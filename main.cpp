@@ -1,6 +1,7 @@
 #include <sys/time.h>
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <list>
 #include <queue>
@@ -101,74 +102,105 @@ public:
 };
 class Solution {
 public:
-    int maxPathSum(TreeNode* root) {
-        if (nullptr == root) return 0;
-        auto re = maxPathSumInternal(root);
-        auto args = {re.find(0) != re.end() ? re[0] : re[1], re[1], re.find(2) != re.end() ? re[2] : re[1]};
-        return max(args);
-    }
-    /*  注意:路径是单向的,不能有重合节点
-     *  将路径分为:
-     *    含根双跨路径(含根节点及两个子节点,这种路径只能用于父节点的不含根路径)
-     *    含根单跨路径(含根节点及至多一个子节点)
-     *    不含根路径
-     *  若节点只有一个子节点,则该节点没有含根双跨路径;若节点没有子节点,则该节点没有不含根路径;所有非空节点均有含根单跨路径
-     *  返回 map<路径类型,val>
-     */
-    map<int,int> maxPathSumInternal(TreeNode* root) {
-        /*
-         *  key 0含根双跨路径 1含根单跨路径 2不含根路径
-         *  re[0] = root->val + left[1] + right[1]
-         *  re[1] = root->val + max(left[1],right[1],0)
-         *  re[2] = max(left[0],left[1],left[2],right[0],right[1],right[2])
-         */
-        map<int,int> re, left, right;
-        re[1] = root->val;
-        if (nullptr == root->left && nullptr == root->right) {
-            return re;
-        }
+    bool exist(vector<vector<char>>& board, string word) {
+        if (board.empty() || word.empty()) return false;
 
-        if (nullptr != root->left) {
-            left = maxPathSumInternal(root->left);
-            auto args = {
-                    left.find(0) != left.end() ? left[0] : left[1],
-                    left[1],
-                    left.find(2) != left.end() ? left[2] : left[1]
-            };
-            re[2] = max(args);
+        auto height = board.size();
+        auto width = board[0].size();
+        auto len = word.size();
+        int i, j, k, i1, j1;
+        set<pair<int,int>> s;
+        for (i = 0; i < height; i++) {
+            for (j = 0; j < width; j++) {
+                i1 = i;
+                j1 = j;
+                k = 0;
+                s.clear();
+                while (k < len && board[i1][j1] == word[k]) {
+                    if (k == len - 1) return true;
+
+                    s.insert(pair<int,int>(i1, j1));
+                    bool stepOn = false;
+                    if (i1 - 1 >= 0 && board[i1-1][j1] == word[k+1] && s.find(pair<int,int>(i1-1,j1)) == s.end()) {
+                        stepOn = true;
+                        i1 -= 1;
+                        k++;
+                        continue;
+                    }
+                    if (i1 + 1 < height && board[i1+1][j1] == word[k+1] && s.find(pair<int,int>(i1+1,j1)) == s.end()) {
+                        stepOn = true;
+                        i1 += 1;
+                        k++;
+                        continue;
+                    }
+                    if (j1 - 1 >= 0 && board[i1][j1-1] == word[k+1] && s.find(pair<int,int>(i1,j1-1)) == s.end()) {
+                        stepOn = true;
+                        j1 -= 1;
+                        k++;
+                        continue;
+                    }
+                    if (j1 + 1 < width && board[i1][j1+1] == word[k+1] && s.find(pair<int,int>(i1,j1+1)) == s.end()) {
+                        stepOn = true;
+                        j1 += 1;
+                        k++;
+                        continue;
+                    }
+                    if (!stepOn) {
+                        if (i1 - 1 >= 0) s.insert(pair<int,int>(i1-1, j1));
+                        if (i1 + 1 < height) s.insert(pair<int,int>(i1+1, j1));
+                        if (j1 - 1 >= 0) s.insert(pair<int,int>(i1, j1-1));
+                        if (j1 + 1 < width) s.insert(pair<int,int>(i1, j1+1));
+                    }
+                    if ((i - 1 >= 0 && s.find(pair<int, int>(i-1, j)) == s.end()) ||
+                        (i + 1 < height && s.find(pair<int, int>(i+1, j)) == s.end()) ||
+                        (j - 1 >= 0 && s.find(pair<int, int>(i, j-1)) == s.end()) ||
+                        (j + 1 < width && s.find(pair<int, int>(i, j+1)) == s.end())) {
+                        i1 = i;
+                        j1 = j;
+                        k = 0;
+                        continue;
+                    }
+                    break;
+                }
+            }
         }
-        if (nullptr != root->right) {
-            right = maxPathSumInternal(root->right);
-            auto args = {
-                    re.find(2) != re.end() ? re[2] : right[1],
-                    right.find(0) != right.end() ? right[0] : right[1],
-                    right[1],
-                    right.find(2) != right.end() ? right[2] : right[1]
-            };
-            re[2] = max(args);
+        return false;
+    }
+    bool existInternal(vector<vector<char>>& board, set<pair<int,int>> &s, pair<int,int> &start, string &word, int k) {
+        if (board.empty() || word.empty()) return false;
+
+        auto height = board.size();
+        auto width = board[0].size();
+        auto len = word.size();
+        int i = start.first, j = start.second;
+        if (k == len - 1) return true;
+
+        s.insert(pair<int, int>(i, j));
+        if (i - 1 >= 0 && board[i - 1][j] == word[k + 1] && s.find(pair<int, int>(i - 1, j)) == s.end()) {
+            pair<int, int> p(i - 1, j);
+            if (existInternal(board, s, p, word, k + 1)) return true;
         }
-        re[0] = root->val;
-        if (!left.empty() && !right.empty()) {
-            re[0] += left[1] + right[1];
+        if (i + 1 < height && board[i + 1][j1] == word[k + 1] && s.find(pair<int, int>(i + 1, j)) == s.end()) {
+            pair<int, int> p(i + 1, j);
+            if (existInternal(board, s, p, word, k + 1)) return true;
         }
-        auto args = {left.find(1) != left.end() ? left[1] : 0, right.find(1) != right.end() ? right[1] : 0, 0};
-        re[1] = root->val + max(args);
-        return re;
-    };
+        if (j - 1 >= 0 && board[i][j - 1] == word[k + 1] && s.find(pair<int, int>(i, j - 1)) == s.end()) {
+            pair<int, int> p(i, j - 1);
+            if (existInternal(board, s, p, word, k + 1)) return true;
+        }
+        if (j + 1 < width && board[i][j + 1] == word[k + 1] && s.find(pair<int, int>(i, j + 1)) == s.end()) {
+            pair<int, int> p(i, j + 1);
+            if (existInternal(board, s, p, word, k + 1)) return true;
+        }
+        return false;
+    }
 };
 int main() {
-    string str;
-    ifstream ifile ("/Users/xp/Downloads/str");
-    getline(ifile, str);
-    ifile.close();
-    vector<string> v{"1","2","null","null","3","4"};
-    auto root = Tree::genTree(v);
     Solution *s = new Solution();
-    cout << s->maxPathSum(root);
-    /*
-    struct timeval b, e;
-    gettimeofday(&b, NULL);
-    gettimeofday(&e, NULL);
-    cout << (e.tv_sec - b.tv_sec)*1000 + (e.tv_usec - b.tv_usec)/1000 << "ms";
-     */
+    vector<vector<char>> vec{
+            {'A','B','C','E'},
+            {'S','F','E','S'},
+            {'A','D','E','E'}
+    };
+    cout << s->exist(vec, "ABCESEEEFS");
 }
