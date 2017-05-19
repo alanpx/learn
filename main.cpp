@@ -9,6 +9,8 @@
 #include <map>
 #include <unordered_map>
 #include <initializer_list>
+#include <cassert>
+#include "leveldb/db.h"
 
 using namespace std;
 
@@ -100,107 +102,14 @@ public:
     }
     ListNode *root = nullptr;
 };
-class Solution {
-public:
-    bool exist(vector<vector<char>>& board, string word) {
-        if (board.empty() || word.empty()) return false;
-
-        auto height = board.size();
-        auto width = board[0].size();
-        auto len = word.size();
-        int i, j, k, i1, j1;
-        set<pair<int,int>> s;
-        for (i = 0; i < height; i++) {
-            for (j = 0; j < width; j++) {
-                i1 = i;
-                j1 = j;
-                k = 0;
-                s.clear();
-                while (k < len && board[i1][j1] == word[k]) {
-                    if (k == len - 1) return true;
-
-                    s.insert(pair<int,int>(i1, j1));
-                    bool stepOn = false;
-                    if (i1 - 1 >= 0 && board[i1-1][j1] == word[k+1] && s.find(pair<int,int>(i1-1,j1)) == s.end()) {
-                        stepOn = true;
-                        i1 -= 1;
-                        k++;
-                        continue;
-                    }
-                    if (i1 + 1 < height && board[i1+1][j1] == word[k+1] && s.find(pair<int,int>(i1+1,j1)) == s.end()) {
-                        stepOn = true;
-                        i1 += 1;
-                        k++;
-                        continue;
-                    }
-                    if (j1 - 1 >= 0 && board[i1][j1-1] == word[k+1] && s.find(pair<int,int>(i1,j1-1)) == s.end()) {
-                        stepOn = true;
-                        j1 -= 1;
-                        k++;
-                        continue;
-                    }
-                    if (j1 + 1 < width && board[i1][j1+1] == word[k+1] && s.find(pair<int,int>(i1,j1+1)) == s.end()) {
-                        stepOn = true;
-                        j1 += 1;
-                        k++;
-                        continue;
-                    }
-                    if (!stepOn) {
-                        if (i1 - 1 >= 0) s.insert(pair<int,int>(i1-1, j1));
-                        if (i1 + 1 < height) s.insert(pair<int,int>(i1+1, j1));
-                        if (j1 - 1 >= 0) s.insert(pair<int,int>(i1, j1-1));
-                        if (j1 + 1 < width) s.insert(pair<int,int>(i1, j1+1));
-                    }
-                    if ((i - 1 >= 0 && s.find(pair<int, int>(i-1, j)) == s.end()) ||
-                        (i + 1 < height && s.find(pair<int, int>(i+1, j)) == s.end()) ||
-                        (j - 1 >= 0 && s.find(pair<int, int>(i, j-1)) == s.end()) ||
-                        (j + 1 < width && s.find(pair<int, int>(i, j+1)) == s.end())) {
-                        i1 = i;
-                        j1 = j;
-                        k = 0;
-                        continue;
-                    }
-                    break;
-                }
-            }
-        }
-        return false;
-    }
-    bool existInternal(vector<vector<char>>& board, set<pair<int,int>> &s, pair<int,int> &start, string &word, int k) {
-        if (board.empty() || word.empty()) return false;
-
-        auto height = board.size();
-        auto width = board[0].size();
-        auto len = word.size();
-        int i = start.first, j = start.second;
-        if (k == len - 1) return true;
-
-        s.insert(pair<int, int>(i, j));
-        if (i - 1 >= 0 && board[i - 1][j] == word[k + 1] && s.find(pair<int, int>(i - 1, j)) == s.end()) {
-            pair<int, int> p(i - 1, j);
-            if (existInternal(board, s, p, word, k + 1)) return true;
-        }
-        if (i + 1 < height && board[i + 1][j1] == word[k + 1] && s.find(pair<int, int>(i + 1, j)) == s.end()) {
-            pair<int, int> p(i + 1, j);
-            if (existInternal(board, s, p, word, k + 1)) return true;
-        }
-        if (j - 1 >= 0 && board[i][j - 1] == word[k + 1] && s.find(pair<int, int>(i, j - 1)) == s.end()) {
-            pair<int, int> p(i, j - 1);
-            if (existInternal(board, s, p, word, k + 1)) return true;
-        }
-        if (j + 1 < width && board[i][j + 1] == word[k + 1] && s.find(pair<int, int>(i, j + 1)) == s.end()) {
-            pair<int, int> p(i, j + 1);
-            if (existInternal(board, s, p, word, k + 1)) return true;
-        }
-        return false;
-    }
-};
 int main() {
-    Solution *s = new Solution();
-    vector<vector<char>> vec{
-            {'A','B','C','E'},
-            {'S','F','E','S'},
-            {'A','D','E','E'}
-    };
-    cout << s->exist(vec, "ABCESEEEFS");
+    leveldb::DB* db;
+    leveldb::Options options;
+    options.create_if_missing = true;
+    leveldb::DB::Open(options, "/tmp/testdb", &db);
+    string key = "name";
+    db->Put(leveldb::WriteOptions(), key, "xp");
+    string value;
+    db->Get(leveldb::ReadOptions(), key, &value);
+    cout << key << ":" << value;
 }
