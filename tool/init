@@ -1,0 +1,23 @@
+#!/bin/bash
+name='xpsess'
+title=('test' 'crm' 'codebase' 'stat' 'mysql' 'log')
+cmd_common='. ~/.bash_profile'
+cmd[0]='cd ~/devspace/test/'
+cmd[1]='cd ~/devspace/work/web_crm/'
+cmd[2]='cd ~/devspace/work/codebasev1/'
+cmd[3]='cd ~/devspace/work/stat/'
+cmd[4]='mysql -h192.168.50.183 -uroot -prraiche -Drric_new'
+cmd[5]='cd ~/devspace/log/'
+
+screen -A -d -m -S $name -t ${title[0]}
+screen -S $name -p ${title[0]} -X stuff "$cmd_common"$'\n'"${cmd[0]}"$'\n'
+for n in {1..5}; do
+    # create now window using `screen` command
+    screen -S $name -X screen -t ${title[n]}
+    if [[ $n = 1 || $n = 2 || $n = 3 ]]; then
+        screen -S $name -p ${title[n]} -X stuff "$cmd_common"$'\n'"${cmd[n]}"$'\n'
+    else
+        screen -S $name -p ${title[n]} -X stuff "$cmd_common"$'\n'"${cmd[n]}"$'\n'
+    fi
+done
+screen -r

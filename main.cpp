@@ -10,7 +10,10 @@
 #include <unordered_map>
 #include <initializer_list>
 #include <cassert>
+#include <thread>
+
 #include "leveldb/db.h"
+#include "leveldb/write_batch.h"
 
 using namespace std;
 
@@ -102,14 +105,21 @@ public:
     }
     ListNode *root = nullptr;
 };
-int main() {
-    leveldb::DB* db;
-    leveldb::Options options;
+void testLevelDB() {
+    using namespace leveldb;
+    DB* db;
+    Options options;
     options.create_if_missing = true;
-    leveldb::DB::Open(options, "/tmp/testdb", &db);
-    string key = "name";
-    db->Put(leveldb::WriteOptions(), key, "xp");
-    string value;
-    db->Get(leveldb::ReadOptions(), key, &value);
-    cout << key << ":" << value;
+    DB::Open(options, "/tmp/testdb", &db);
+    WriteBatch batch;
+    batch.Put("01", "01");
+    db->Write(WriteOptions(), &batch);
+    /*
+    string val;
+    db->Get(leveldb::ReadOptions(), "name2", &val);
+    cout << val;
+     */
+}
+int main() {
+    testLevelDB();
 }

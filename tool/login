@@ -1,0 +1,14 @@
+#!/usr/bin/expect
+set timeout 864000
+set device [lindex $argv 0]
+if { "$device" == "" } { set device "5" }
+spawn ssh xiaopeng@gate.haoche51.com
+expect "password:"
+send "5KMO4spVPZ0Jdy5s\n"
+expect "ID>:"
+send "p\n"
+expect "ID>:"
+send "$device\n"
+expect "ID>:"
+send "1\n"
+interact
