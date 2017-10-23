@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 )
 
 type BTree struct {
@@ -194,4 +195,27 @@ func (node *BTreeNode) balanceChild(from int, to int) {
 			f.children = f.children[1:]
 		}
 	}
+}
+func (tree *BTree) String() string {
+	// use nil to indicate the level ending
+	q := []*BTreeNode{tree.root, nil}
+	str := ""
+	for len(q) > 0 {
+		if q[0] == nil {
+			str += "\n"
+			q = q[1:]
+			continue
+		}
+
+		var s []string
+		for _, v := range q[0].elements {
+			s = append(s, fmt.Sprintf("%d", v))
+		}
+		str += strings.Join(s, ",") + " "
+		q = append(q[1:], q[0].children...)
+		if q[0] == nil {
+			q = append(q, nil)
+		}
+	}
+	return str
 }
