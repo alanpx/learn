@@ -6,30 +6,34 @@ import (
 )
 
 type BTree struct {
-	degree int // minimum degree
+	degree int  // minimum degree
+	bplus  bool // is B+ tree
 	root   *BTreeNode
 }
 type BTreeNode struct {
-	elements []BTreeElement
+	elements []BTreeElem
 	children []*BTreeNode
 }
-type BTreeElement int
+type BTreeElem int
 
-func NewBTree(degree int) BTree {
-	return BTree{degree, &BTreeNode{}}
+func NewBTree(degree int, bplus bool) BTree {
+	return BTree{degree, bplus, &BTreeNode{}}
 }
-func (tree *BTree) Add(elements ...BTreeElement) {
+func (node *BTreeNode) isLeaf() bool {
+	return len(node.children) == 0
+}
+func (tree *BTree) Add(elements ...BTreeElem) {
 	for _, ele := range elements {
 		// if the root is full, add a new root
 		if len(tree.root.elements) == 2*tree.degree-1 {
 			root := tree.root
-			tree.root = &BTreeNode{[]BTreeElement{}, []*BTreeNode{root}}
+			tree.root = &BTreeNode{[]BTreeElem{}, []*BTreeNode{root}}
 		}
 		tree.addToNonFullNode(ele, tree.root)
 	}
 }
-func (tree *BTree) addToNonFullNode(ele BTreeElement, node *BTreeNode) {
-	if len(node.children) == 0 {
+func (tree *BTree) addToNonFullNode(ele BTreeElem, node *BTreeNode) {
+	if node.isLeaf() {
 		node.elements = append(node.elements, ele)
 		return
 	}
@@ -46,17 +50,23 @@ func (tree *BTree) addToNonFullNode(ele BTreeElement, node *BTreeNode) {
 		fullNode := node.children[i+1]
 		midElement := fullNode.elements[degree-1]
 		var newNode BTreeNode
-		newNode.elements = make([]BTreeElement, degree-1)
-		copy(newNode.elements, fullNode.elements[degree:])
+		// when splitting leaf node of B+ tree, leave the mid element to the right child
+		if tree.bplus && fullNode.isLeaf() {
+			newNode.elements = make([]BTreeElem, degree)
+			copy(newNode.elements, fullNode.elements[degree-1:])
+		} else {
+			newNode.elements = make([]BTreeElem, degree-1)
+			copy(newNode.elements, fullNode.elements[degree:])
+		}
 		fullNode.elements = fullNode.elements[:degree-1]
 
-		if len(fullNode.children) > 0 {
+		if !fullNode.isLeaf() {
 			newNode.children = make([]*BTreeNode, degree)
 			copy(newNode.children, fullNode.children[degree:])
 			fullNode.children = fullNode.children[:degree]
 		}
 
-		node.elements = append(node.elements[:i+1], append([]BTreeElement{midElement}, node.elements[i+1:]...)...)
+		node.elements = append(node.elements[:i+1], append([]BTreeElem{midElement}, node.elements[i+1:]...)...)
 		node.children = append(node.children[:i+2], append([]*BTreeNode{&newNode}, node.children[i+2:]...)...)
 
 		if ele >= node.elements[i+1] {
@@ -65,7 +75,7 @@ func (tree *BTree) addToNonFullNode(ele BTreeElement, node *BTreeNode) {
 	}
 	tree.addToNonFullNode(ele, node.children[i+1])
 }
-func (tree *BTree) Rem(elements ...BTreeElement) {
+func (tree *BTree) Rem(elements ...BTreeElem) {
 	if len(tree.root.elements) == 0 {
 		return
 	}
@@ -73,22 +83,22 @@ func (tree *BTree) Rem(elements ...BTreeElement) {
 		tree.remFromNode(ele, tree.root)
 	}
 }
-func (tree *BTree) remFromNode(ele BTreeElement, node *BTreeNode) {
+func (tree *BTree) remFromNode(ele BTreeElem, node *BTreeNode) {
 	var i int
 	for i = len(node.elements) - 1; i >= 0; i-- {
 		if ele >= node.elements[i] {
 			break
 		}
 	}
-	if len(node.children) == 0 {
+	if node.isLeaf() {
 		if i >= 0 && ele == node.elements[i] {
 			node.elements = append(node.elements[:i], node.elements[i+1:]...)
 		}
 		return
 	}
 
-	// remove from current node
-	if i >= 0 && ele == node.elements[i] {
+	// remove from current node. There is no need to do this for B+ tree
+	if !tree.bplus && i >= 0 && ele == node.elements[i] {
 		if len(node.children[i].elements) >= tree.degree {
 			del := tree.remExtreme(node.children[i], true)
 			node.elements[i] = del
@@ -110,26 +120,26 @@ func (tree *BTree) remFromNode(ele BTreeElement, node *BTreeNode) {
 				tree.mergeChildren(node, i)
 				merged = true
 			} else {
-				node.balanceChild(i, i+1)
+				tree.balanceChild(node, i, i+1)
 			}
 		} else {
 			if len(node.children[i+2].elements) == tree.degree-1 {
 				tree.mergeChildren(node, i+1)
 				merged = true
 			} else {
-				node.balanceChild(i+2, i+1)
+				tree.balanceChild(node, i+2, i+1)
 			}
 		}
 	}
-	nodeIndex := i+1
-	if merged && i >= 0{
+	nodeIndex := i + 1
+	if merged && i >= 0 {
 		nodeIndex = i
 	}
 	tree.remFromNode(ele, node.children[nodeIndex])
 }
-func (tree *BTree) remExtreme(node *BTreeNode, isMax bool) BTreeElement {
-	if len(node.children) == 0 {
-		var ele BTreeElement
+func (tree *BTree) remExtreme(node *BTreeNode, isMax bool) BTreeElem {
+	if node.isLeaf() {
+		var ele BTreeElem
 		if isMax {
 			ele = node.elements[len(node.elements)-1]
 			node.elements = node.elements[:len(node.elements)-1]
@@ -147,7 +157,7 @@ func (tree *BTree) remExtreme(node *BTreeNode, isMax bool) BTreeElement {
 			if len(node.children[len(node.children)-2].elements) == tree.degree-1 {
 				tree.mergeChildren(node, len(node.elements)-1)
 			} else {
-				node.balanceChild(len(node.children)-2, len(node.children)-1)
+				tree.balanceChild(node, len(node.children)-2, len(node.children)-1)
 			}
 		}
 	} else {
@@ -156,14 +166,17 @@ func (tree *BTree) remExtreme(node *BTreeNode, isMax bool) BTreeElement {
 			if len(node.children[1].elements) == tree.degree-1 {
 				tree.mergeChildren(node, 0)
 			} else {
-				node.balanceChild(1, 0)
+				tree.balanceChild(node, 1, 0)
 			}
 		}
 	}
 	return tree.remExtreme(n, isMax)
 }
 func (tree *BTree) mergeChildren(node *BTreeNode, i int) {
-	node.children[i].elements = append(node.children[i].elements, append([]BTreeElement{node.elements[i]}, node.children[i+1].elements...)...)
+	if !tree.bplus || !node.children[i].isLeaf() {
+		node.children[i].elements = append(node.children[i].elements, node.elements[i])
+	}
+	node.children[i].elements = append(node.children[i].elements, node.children[i+1].elements...)
 	node.children[i].children = append(node.children[i].children, node.children[i+1].children...)
 	node.elements = append(node.elements[:i], node.elements[i+1:]...)
 	node.children = append(node.children[:i+1], node.children[i+2:]...)
@@ -172,25 +185,35 @@ func (tree *BTree) mergeChildren(node *BTreeNode, i int) {
 		tree.root = tree.root.children[0]
 	}
 }
-func (node *BTreeNode) balanceChild(from int, to int) {
+func (tree *BTree) balanceChild(node *BTreeNode, from int, to int) {
 	if from-to != 1 && to-from != 1 {
 		panic(fmt.Sprintf("position %d and %d are not adjacent", from, to))
 	}
 	f := node.children[from]
 	t := node.children[to]
 	if from < to {
-		t.elements = append([]BTreeElement{node.elements[from]}, t.elements...)
-		node.elements[from] = f.elements[len(f.elements)-1]
+		if tree.bplus && f.isLeaf() {
+			node.elements[from] = f.elements[len(f.elements)-1]
+			t.elements = append([]BTreeElem{node.elements[from]}, t.elements...)
+		} else {
+			t.elements = append([]BTreeElem{node.elements[from]}, t.elements...)
+			node.elements[from] = f.elements[len(f.elements)-1]
+		}
 		f.elements = f.elements[:len(f.elements)-1]
-		if len(f.children) > 0 {
+		if !f.isLeaf() {
 			t.children = append([]*BTreeNode{f.children[len(f.children)-1]}, t.children...)
 			f.children = f.children[:len(f.children)-1]
 		}
 	} else {
-		t.elements = append(t.elements, node.elements[to])
-		node.elements[to] = f.elements[0]
+		if tree.bplus && f.isLeaf() {
+			node.elements[to] = f.elements[0]
+			t.elements = append(t.elements, node.elements[to])
+		} else {
+			t.elements = append(t.elements, node.elements[to])
+			node.elements[to] = f.elements[0]
+		}
 		f.elements = f.elements[1:]
-		if len(f.children) > 0 {
+		if !f.isLeaf() {
 			t.children = append(t.children, f.children[0])
 			f.children = f.children[1:]
 		}
