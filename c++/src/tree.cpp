@@ -1,32 +1,14 @@
-#include <sys/time.h>
-#include <iostream>
-#include <fstream>
-#include <sstream>
+#include <string>
 #include <vector>
-#include <list>
 #include <queue>
-#include <set>
-#include <map>
-#include <unordered_map>
-#include <initializer_list>
-#include <cassert>
-#include <thread>
-
-#include "leveldb/db.h"
-#include "leveldb/write_batch.h"
 
 using namespace std;
 
-struct ListNode {
-    int val;
-    ListNode *next;
-    ListNode(int x) : val(x), next(NULL) {}
-};
 struct TreeNode {
     int val;
     TreeNode *left;
     TreeNode *right;
-    TreeNode(int x) : val(x), left(NULL), right(NULL) {}
+    TreeNode(int x) : val(x), left(nullptr), right(nullptr) {}
 };
 class Tree {
 public:
@@ -81,45 +63,3 @@ public:
         return root;
     }
 };
-class LinkList {
-public:
-    LinkList(initializer_list<int> l) {
-        ListNode *last = root, *add;
-        for (auto i = l.begin(); i != l.end(); i++) {
-            add = new ListNode(*i);
-            if (nullptr == root) {
-                root = add;
-                last = root;
-                continue;
-            }
-            last->next = add;
-            last = last->next;
-        }
-    }
-    void print() {
-        auto cur = root;
-        while (nullptr != cur) {
-            cout << cur->val << " ";
-            cur = cur->next;
-        }
-    }
-    ListNode *root = nullptr;
-};
-void testLevelDB() {
-    using namespace leveldb;
-    DB* db;
-    Options options;
-    options.create_if_missing = true;
-    DB::Open(options, "/tmp/testdb", &db);
-    WriteBatch batch;
-    batch.Put("01", "01");
-    db->Write(WriteOptions(), &batch);
-    /*
-    string val;
-    db->Get(leveldb::ReadOptions(), "name2", &val);
-    cout << val;
-     */
-}
-int main() {
-    testLevelDB();
-}

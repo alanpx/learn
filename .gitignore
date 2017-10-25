@@ -1,4 +1,4 @@
 .idea/
 CMakeFiles/
-.DS_Store
+cmake-build-debug/
 go/build/
