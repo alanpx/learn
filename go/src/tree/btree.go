@@ -7,6 +7,7 @@ import (
     "unsafe"
     "bytes"
     "encoding/binary"
+    "io/ioutil"
 )
 
 type BTree struct {
@@ -30,27 +31,35 @@ type BTreeElem int32
 type elementLenType uint32 // node elements length type on disk
 type pageNoType uint32
 
-func NewBTree(bplus bool, file string, degree int) BTree {
+func NewBTree(bplus bool, fileName string, degree int) *BTree {
+    _, err := os.Stat(fileName)
+    if err == nil {
+        return restoreFromFile(fileName)
+    }
+
     btree := BTree{}
     btree.bplus = bplus
-    btree.fileName = file
+    btree.fileName = fileName
     btree.sync = false
     btree.degree = degree
     btree.maxPageNo = 0
     btree.pageSize = 32
-    // TODO how to convert appropriately
-    elementLenSize := uint32(unsafe.Sizeof(elementLenType(0)))
-    elementSize := uint32(unsafe.Sizeof(BTreeElem(0)))
-    pageNoSize := uint32(unsafe.Sizeof(btree.maxPageNo))
-    if file != "" {
+    if fileName != "" {
         btree.sync = true
         if degree == 0 {
-            // elementLenSize + (2*degree-1)*elementSize + (2*degree)*pageNoSize <= pageSize
-            btree.degree = int((btree.pageSize-elementLenSize+elementSize)/(2*pageNoSize+2*elementSize))
+            btree.degree = getDegree(btree.pageSize)
         }
     }
     btree.root = btree.newBtreeNode(nil, nil)
-    return btree
+    return &btree
+}
+func getDegree(pageSize uint32) int {
+    elementLenSize := uint32(unsafe.Sizeof(elementLenType(0)))
+    elementSize := uint32(unsafe.Sizeof(BTreeElem(0)))
+    pageNoSize := uint32(unsafe.Sizeof(pageNoType(0)))
+    // elementLenSize + (2*degree-1)*elementSize + (2*degree)*pageNoSize <= pageSize
+    degree := int((pageSize-elementLenSize+elementSize)/(2*pageNoSize+2*elementSize))
+    return degree
 }
 func (tree *BTree) newBtreeNode(elements []BTreeElem, children []*btreeNode) *btreeNode {
     tree.maxPageNo++
@@ -86,6 +95,56 @@ func (tree *BTree) syncMeta() {
     binary.Write(buf, binary.LittleEndian, tree.root.pageNo)
     binary.Write(buf, binary.LittleEndian, tree.pageSize)
     tree.writeAt(buf.Bytes(), 0)
+}
+func restoreFromFile(fileName string) *BTree {
+    if fileName == "" {
+        return nil
+    }
+    file, err := os.Open(fileName)
+    if err != nil {
+        fmt.Println(err)
+    }
+    data, err := ioutil.ReadAll(file)
+    if err != nil {
+        fmt.Println(err)
+    }
+    reader := bytes.NewReader(data)
+    tr := &BTree{}
+    binary.Read(reader, binary.LittleEndian, &tr.bplus)
+    binary.Read(reader, binary.LittleEndian, &tr.maxPageNo)
+    var rootPageNo pageNoType
+    binary.Read(reader, binary.LittleEndian, &rootPageNo)
+    binary.Read(reader, binary.LittleEndian, &tr.pageSize)
+    tr.degree = getDegree(tr.pageSize)
+    tr.sync = true
+    tr.fileName = fileName
+    tr.root = tr.parseNode(data, rootPageNo)
+    return tr
+}
+func (tree *BTree) parseNode(data []byte, pageNo pageNoType) *btreeNode {
+    node := &btreeNode{}
+    node.pageNo = pageNo
+    var eleLen elementLenType
+    reader := bytes.NewReader(data[tree.pageSize*uint32(pageNo):tree.pageSize*(uint32(pageNo)+1)])
+    binary.Read(reader, binary.LittleEndian, &eleLen)
+    var ele BTreeElem
+    for i := 1; i <= 2*tree.degree-1; i++ {
+        binary.Read(reader, binary.LittleEndian, &ele)
+        if i <= int(eleLen) {
+            node.elements = append(node.elements, ele)
+        }
+    }
+    var child pageNoType
+    for i := 1; i <= 2*tree.degree; i++ {
+        binary.Read(reader, binary.LittleEndian, &child)
+        if child == 0 { // leaf node
+            break
+        }
+        if i <= int(eleLen) + 1 {
+            node.children = append(node.children, tree.parseNode(data, child))
+        }
+    }
+    return node
 }
 func (tree *BTree) writeAt(data []byte, offset int64) {
     if !tree.sync {
