@@ -52,7 +52,7 @@ func NewBTree(bplus bool, fileName string, degree int) *BTree {
     btree.maxPageNo = 0
     if fileName != "" {
         btree.sync = true
-        btree.pageSize = 32
+        btree.pageSize = 64
         if degree == 0 {
             btree.degree = getDegree(btree.pageSize)
         }
@@ -368,8 +368,8 @@ func (tree *BTree) syncNode(node *btreeNode) {
     for _, child := range node.children {
         binary.Write(buf, binary.LittleEndian, child.pageNo)
     }
-    if len(node.children) < 2*tree.degree {
-        zeroLen := (2*tree.degree - len(node.children)) * int(unsafe.Sizeof(tree.maxPageNo))
+    if uint32(buf.Len()) < tree.pageSize {
+        zeroLen := tree.pageSize - uint32(buf.Len())
         binary.Write(buf, binary.LittleEndian, make([]byte, zeroLen))
     }
     tree.writeAt(buf.Bytes(), int64(uint32(node.pageNo)*tree.pageSize))
@@ -384,6 +384,14 @@ func (tree *BTree) syncMeta() {
     binary.Write(buf, binary.LittleEndian, tree.pageSize)
     tree.writeAt(buf.Bytes(), 0)
 }
+/*
+ * There are two options to avoid the cyclic reference:
+ * 1. Parse children nodes recursively.
+ * After the total tree has been parsed, build the leaf node linked list.
+ * 2. Parse all reference nodes recursively.
+ * But keep all the (partly) parsed nodes in a map.
+ * We take the second option, the more general one.
+ */
 func parseBTree(fileName string) *BTree {
     if fileName == "" {
         return nil
@@ -414,21 +422,27 @@ func parseBTree(fileName string) *BTree {
     tr.degree = getDegree(tr.pageSize)
     tr.sync = true
     tr.fileName = fileName
-    tr.root = tr.parseNode(data, rootPageNo)
+    pageNoMap := make([]*btreeNode, tr.maxPageNo+1)
+    tr.root = tr.parseNode(data, rootPageNo, pageNoMap)
     return tr
 }
-func (tree *BTree) parseNode(data []byte, pageNo pageNoType) *btreeNode {
+func (tree *BTree) parseNode(data []byte, pageNo pageNoType, pageNoMap []*btreeNode) *btreeNode {
+    if pageNoMap[pageNo] != nil {
+        return pageNoMap[pageNo]
+    }
+
     node := &btreeNode{}
+    pageNoMap[pageNo] = node
     node.pageNo = pageNo
     reader := bytes.NewReader(data[tree.pageSize*uint32(pageNo):tree.pageSize*(uint32(pageNo)+1)])
     var prev, next pageNoType
     binary.Read(reader, binary.LittleEndian, &prev)
     binary.Read(reader, binary.LittleEndian, &next)
     if prev > 0 {
-        node.prev = tree.parseNode(data, prev)
+        node.prev = tree.parseNode(data, prev, pageNoMap)
     }
     if next > 0 {
-        node.next = tree.parseNode(data, next)
+        node.next = tree.parseNode(data, next, pageNoMap)
     }
     var eleLen elementLenType
     binary.Read(reader, binary.LittleEndian, &eleLen)
@@ -446,7 +460,7 @@ func (tree *BTree) parseNode(data []byte, pageNo pageNoType) *btreeNode {
             break
         }
         if i <= int(eleLen)+1 {
-            node.children = append(node.children, tree.parseNode(data, child))
+            node.children = append(node.children, tree.parseNode(data, child, pageNoMap))
         }
     }
     return node
