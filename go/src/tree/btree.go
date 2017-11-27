@@ -11,7 +11,7 @@ import (
     "strconv"
 )
 
-const magicNumber uint32 = 0x42e09ad3  // to detect B tree data file
+const magicNumber uint32 = 0x42e09ad3 // to detect B tree data file
 
 type BTree struct {
     *btreeConf
@@ -19,11 +19,11 @@ type BTree struct {
     maxPageNo pageNoType
 }
 type btreeConf struct {
-    bplus bool  // is B+ tree
-    fileName  string
-    sync      bool
-    pageSize  uint32
-    degree    int  // minimum degree
+    bplus    bool // is B+ tree
+    fileName string
+    sync     bool
+    pageSize uint32
+    degree   int // minimum degree
 }
 type btreeNode struct {
     elements []BTreeElem
@@ -32,6 +32,7 @@ type btreeNode struct {
     // "prev" and "next" are used to create a linked list of leaf node of B+ tree
     prev *btreeNode
     next *btreeNode
+    hasLoaded bool // has been loaded from disk
 }
 type BTreeElem struct {
     Key KeyType
@@ -47,7 +48,7 @@ func NewBTree(conf map[string]string) *BTree {
     if c.fileName != "" {
         _, err := os.Stat(c.fileName)
         if err == nil {
-            tr := parseBTree(c.fileName)
+            tr := parseBTree(c.fileName, true, c.pageSize)
             if tr != nil {
                 return tr
             }
@@ -61,7 +62,12 @@ func NewBTree(conf map[string]string) *BTree {
 }
 func (tree *BTree) newBtreeNode(elements []BTreeElem, children []*btreeNode) *btreeNode {
     tree.maxPageNo++
-    return &btreeNode{elements, children, tree.maxPageNo, nil, nil}
+    node := btreeNode{}
+    node.elements = elements
+    node.children = children
+    node.pageNo = tree.maxPageNo
+    node.hasLoaded = true
+    return &node
 }
 func newConf(conf map[string]string) *btreeConf {
     c := btreeConf{}
@@ -107,6 +113,10 @@ func getDegree(pageSize uint32) int {
 
 func (tree *BTree) Add(elements ...BTreeElem) {
     for _, ele := range elements {
+        // there is no meaning for B tree to store data, just ignore it
+        if !tree.bplus {
+            ele.Val = nil
+        }
         // if the root is full, add a new root
         if tree.isNodeFull(tree.root, nil) {
             root := tree.root
@@ -132,13 +142,17 @@ func (tree *BTree) addToNonFullNode(ele BTreeElem, node *btreeNode) {
     // split the full child, upgrade the mid element of the full child to current node
     if tree.isNodeFull(node.children[i+1], &ele) {
         fullNode := node.children[i+1]
-        midElement := fullNode.elements[degree-1]
+        midElement := fullNode.elements[len(fullNode.elements)/2]
+        // for B+ tree inner node, only keep the key
+        if tree.bplus {
+            midElement = BTreeElem{midElement.Key, nil}
+        }
         newNode := tree.newBtreeNode(nil, nil)
         // splitting leaf node of B+ tree
         if tree.bplus && fullNode.isLeaf() {
             // leave the mid element to the right child
             newNode.elements = make([]BTreeElem, (len(fullNode.elements)+1)/2)
-            copy(newNode.elements, fullNode.elements[len(fullNode.elements)/2+1:])
+            copy(newNode.elements, fullNode.elements[len(fullNode.elements)/2:])
 
             // create the linked list
             fullNode.next = newNode
@@ -155,7 +169,7 @@ func (tree *BTree) addToNonFullNode(ele BTreeElem, node *btreeNode) {
             newNode.elements = make([]BTreeElem, degree-1)
             copy(newNode.elements, fullNode.elements[degree:])
         }
-        fullNode.elements = fullNode.elements[:degree-1]
+        fullNode.elements = fullNode.elements[:len(fullNode.elements)/2]
 
         if !fullNode.isLeaf() {
             newNode.children = make([]*btreeNode, degree)
@@ -329,6 +343,49 @@ func (tree *BTree) balanceChild(node *btreeNode, from int, to int) {
     tree.syncNode(f)
     tree.syncNode(t)
 }
+func (tree *BTree) Get(key KeyType) []BTreeElem {
+    var re []BTreeElem
+    node := tree.root
+    for node != nil {
+        var i int
+        for i = 0; i < len(node.elements); i++ {
+            if node.elements[i].compareKey(key) == 0 {
+                // for b tree, return the first equal element
+                if !tree.bplus {
+                    re = append(re, node.elements[i])
+                    return re
+                } else if node.isLeaf() {
+                    re = append(re, node.elements[i])
+                }
+            }
+            if node.elements[i].compareKey(key) > 0 {
+                break
+            }
+        }
+        if node.isLeaf() {
+            node = nil
+        } else {
+            node = node.children[i]
+        }
+    }
+    return re
+}
+func (tree *BTree) GetByCond(cond func(BTreeElem) bool) []BTreeElem {
+    var re []BTreeElem
+    node := tree.root
+    for !node.isLeaf() {
+        node = node.children[0]
+    }
+    for node != nil {
+        for i := 0; i < len(node.elements); i++ {
+            if cond(node.elements[i]) {
+                re = append(re, node.elements[i])
+            }
+        }
+        node = node.next
+    }
+    return re
+}
 
 func (tree *BTree) String() string {
     // use nil to indicate the level ending
@@ -352,7 +409,11 @@ func (tree *BTree) String() string {
 func (node *btreeNode) String() string {
     var s []string
     for _, v := range node.elements {
-        s = append(s, fmt.Sprintf("%d", v.Key))
+        ele := fmt.Sprintf("%d", v.Key)
+        if len(v.Val) > 0 {
+            ele += fmt.Sprintf(":%d", v.Val)
+        }
+        s = append(s, ele)
     }
     return strings.Join(s, ",")
 }
@@ -377,8 +438,11 @@ func (tree *BTree) LeafString() string {
 }
 
 func (tree *BTree) syncNode(node *btreeNode) {
-    // next(pageNoType) prev(pageNoType) elementLen(elementLenType) element children
+    // common: isLeaf(bool) prev(pageNoType) next(pageNoType) elementLen(elementLenType)
+    // b+ tree leaf node: element.Key element.ValLen(valueLenType) element.Val
+    // else: element.Key children(pageNoType)
     buf := new(bytes.Buffer)
+    binary.Write(buf, binary.LittleEndian, node.isLeaf())
     if node.prev != nil {
         binary.Write(buf, binary.LittleEndian, node.prev.pageNo)
     } else {
@@ -391,14 +455,24 @@ func (tree *BTree) syncNode(node *btreeNode) {
     }
     binary.Write(buf, binary.LittleEndian, elementLenType(len(node.elements)))
     for _, ele := range node.elements {
-        binary.Write(buf, binary.LittleEndian, ele)
+        if tree.bplus && node.isLeaf() {
+            binary.Write(buf, binary.LittleEndian, ele.Key)
+            binary.Write(buf, binary.LittleEndian, valueLenType(len(ele.Val)))
+            for _, val := range ele.Val {
+                binary.Write(buf, binary.LittleEndian, val)
+            }
+        } else {
+            binary.Write(buf, binary.LittleEndian, ele.Key)
+        }
     }
-    if len(node.elements) < 2*tree.degree-1 {
-        zeroLen := (2*tree.degree - 1 - len(node.elements)) * int(unsafe.Sizeof(KeyType(0)))
-        binary.Write(buf, binary.LittleEndian, make([]byte, zeroLen))
-    }
-    for _, child := range node.children {
-        binary.Write(buf, binary.LittleEndian, child.pageNo)
+    if !tree.bplus || !node.isLeaf() {
+        if len(node.elements) < 2*tree.degree-1 {
+            zeroLen := (2*tree.degree - 1 - len(node.elements)) * int(unsafe.Sizeof(KeyType(0)))
+            binary.Write(buf, binary.LittleEndian, make([]byte, zeroLen))
+        }
+        for _, child := range node.children {
+            binary.Write(buf, binary.LittleEndian, child.pageNo)
+        }
     }
     if uint32(buf.Len()) < tree.pageSize {
         zeroLen := tree.pageSize - uint32(buf.Len())
@@ -417,6 +491,7 @@ func (tree *BTree) syncMeta() {
     binary.Write(buf, binary.LittleEndian, uint32(tree.degree))
     tree.writeAt(buf.Bytes(), 0)
 }
+
 /*
  * There are two options to avoid the cyclic reference:
  * 1. Parse children nodes recursively.
@@ -425,7 +500,7 @@ func (tree *BTree) syncMeta() {
  * But keep all the (partly) parsed nodes in a map.
  * We take the second option, the more general one.
  */
-func parseBTree(fileName string) *BTree {
+func parseBTree(fileName string, parseAll bool, pageSize uint32) *BTree {
     if fileName == "" {
         return nil
     }
@@ -434,10 +509,17 @@ func parseBTree(fileName string) *BTree {
         fmt.Println(err)
         return nil
     }
-    data, err := ioutil.ReadAll(file)
-    if err != nil {
-        fmt.Println(err)
-        return nil
+    defer file.Close()
+    var data []byte
+    if parseAll {
+        data, err = ioutil.ReadAll(file)
+        if err != nil {
+            fmt.Println(err)
+            return nil
+        }
+    } else {
+        data = make([]byte, 2*pageSize)
+        file.Read(data)
     }
 
     reader := bytes.NewReader(data)
@@ -459,44 +541,71 @@ func parseBTree(fileName string) *BTree {
     tr.sync = true
     tr.fileName = fileName
     pageNoMap := make([]*btreeNode, tr.maxPageNo+1)
-    tr.root = tr.parseNode(data, rootPageNo, pageNoMap)
+    tr.root = tr.parseNode(data, rootPageNo, parseAll, pageNoMap)
     return tr
 }
-func (tree *BTree) parseNode(data []byte, pageNo pageNoType, pageNoMap []*btreeNode) *btreeNode {
-    if pageNoMap[pageNo] != nil {
+func (tree *BTree) parseNode(data []byte, pageNo pageNoType, parseAll bool, pageNoMap []*btreeNode) *btreeNode {
+    if parseAll && pageNoMap[pageNo] != nil {
         return pageNoMap[pageNo]
     }
 
     node := &btreeNode{}
     pageNoMap[pageNo] = node
     node.pageNo = pageNo
-    reader := bytes.NewReader(data[tree.pageSize*uint32(pageNo):tree.pageSize*(uint32(pageNo)+1)])
+    reader := bytes.NewReader(data[:tree.pageSize])
+    data = data[tree.pageSize:]
+    var isLeaf bool
+    binary.Read(reader, binary.LittleEndian, &isLeaf)
     var prev, next pageNoType
     binary.Read(reader, binary.LittleEndian, &prev)
     binary.Read(reader, binary.LittleEndian, &next)
     if prev > 0 {
-        node.prev = tree.parseNode(data, prev, pageNoMap)
+        if parseAll {
+            node.prev = tree.parseNode(data, prev, parseAll, pageNoMap)
+        } else {
+            prevNode := btreeNode{}
+            prevNode.pageNo = prev
+            node.prev = &prevNode
+        }
     }
     if next > 0 {
-        node.next = tree.parseNode(data, next, pageNoMap)
+        if parseAll {
+            node.next = tree.parseNode(data, next, parseAll, pageNoMap)
+        } else {
+            nextNode := btreeNode{}
+            nextNode.pageNo = next
+            node.prev = &nextNode
+        }
     }
     var eleLen elementLenType
     binary.Read(reader, binary.LittleEndian, &eleLen)
-    var ele BTreeElem
+    ele := BTreeElem{}
     for i := 1; i <= 2*tree.degree-1; i++ {
-        binary.Read(reader, binary.LittleEndian, &ele)
+        binary.Read(reader, binary.LittleEndian, &ele.Key)
+        if tree.bplus && isLeaf {
+            var valLen valueLenType
+            binary.Read(reader, binary.LittleEndian, &valLen)
+            var val byte
+            for j := valueLenType(0); j < valLen; j++ {
+                binary.Read(reader, binary.LittleEndian, &val)
+                ele.Val = append(ele.Val, val)
+            }
+        }
         if i <= int(eleLen) {
             node.elements = append(node.elements, ele)
         }
     }
-    var child pageNoType
-    for i := 1; i <= 2*tree.degree; i++ {
-        binary.Read(reader, binary.LittleEndian, &child)
-        if child == 0 { // leaf node
-            break
-        }
-        if i <= int(eleLen)+1 {
-            node.children = append(node.children, tree.parseNode(data, child, pageNoMap))
+    if !isLeaf {
+        var child pageNoType
+        for i := elementLenType(1); i <= eleLen+1; i++ {
+            binary.Read(reader, binary.LittleEndian, &child)
+            if parseAll {
+                node.children = append(node.children, tree.parseNode(data, child, parseAll, pageNoMap))
+            } else {
+                childNode := btreeNode{}
+                childNode.pageNo = child
+                node.children = append(node.children, &childNode)
+            }
         }
     }
     return node
@@ -505,7 +614,7 @@ func (tree *BTree) writeAt(data []byte, offset int64) {
     if !tree.sync {
         return
     }
-    file, err := os.OpenFile(tree.fileName, os.O_WRONLY | os.O_CREATE, 0666)
+    file, err := os.OpenFile(tree.fileName, os.O_WRONLY|os.O_CREATE, 0666)
     if err != nil {
         fmt.Println(err)
     }
@@ -521,12 +630,25 @@ func (tree *BTree) isNodeFull(node *btreeNode, ele *BTreeElem) bool {
         return len(node.elements) == 2*tree.degree-1
     }
 
-    return tree.pageSize <= node.stringSize() + ele.stringSize()
+    return tree.pageSize <= node.stringSize()+ele.stringSize()
+}
+func (tree *BTree) loadNode(node *btreeNode) {
+    if !node.hasLoaded {
+        file, err := os.Open(tree.fileName)
+        if err != nil {
+            fmt.Println(err)
+            return
+        }
+        defer file.Close()
+        data := make([]byte, 2*tree.pageSize)
+        file.Read(data)
+        *node = *tree.parseNode(data, node.pageNo, false, nil)
+    }
 }
 func (node *btreeNode) isLeaf() bool {
     return len(node.children) == 0
 }
-func (node *btreeNode) stringSize() uint32{
+func (node *btreeNode) stringSize() uint32 {
     var size uint32
     if !node.isLeaf() {
         return size
@@ -540,9 +662,12 @@ func (node *btreeNode) stringSize() uint32{
     return size
 }
 func (ele BTreeElem) compare(ele1 BTreeElem) int {
-    if ele.Key > ele1.Key {
+    return ele.compareKey(ele1.Key)
+}
+func (ele BTreeElem) compareKey(key KeyType) int {
+    if ele.Key > key {
         return 1
-    } else if ele.Key == ele1.Key {
+    } else if ele.Key == key {
         return 0
     } else {
         return -1
