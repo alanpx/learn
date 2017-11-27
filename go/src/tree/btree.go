@@ -8,18 +8,22 @@ import (
     "bytes"
     "encoding/binary"
     "io/ioutil"
+    "strconv"
 )
 
 const magicNumber uint32 = 0x42e09ad3  // to detect B tree data file
 
 type BTree struct {
-    degree    int  // minimum degree
-    bplus     bool // is B+ tree
+    *btreeConf
     root      *btreeNode
     maxPageNo pageNoType
-    sync      bool
+}
+type btreeConf struct {
+    bplus bool  // is B+ tree
     fileName  string
+    sync      bool
     pageSize  uint32
+    degree    int  // minimum degree
 }
 type btreeNode struct {
     elements []BTreeElem
@@ -29,46 +33,82 @@ type btreeNode struct {
     prev *btreeNode
     next *btreeNode
 }
-type BTreeElem int32
+type BTreeElem struct {
+    Key KeyType
+    Val []byte
+}
+type KeyType uint32
 type elementLenType uint32 // node elements length type on disk
+type valueLenType uint32
 type pageNoType uint32
 
-func NewBTree(bplus bool, fileName string, degree int) *BTree {
-    if fileName != "" {
-        _, err := os.Stat(fileName)
+func NewBTree(conf map[string]string) *BTree {
+    c := newConf(conf)
+    if c.fileName != "" {
+        _, err := os.Stat(c.fileName)
         if err == nil {
-            tr := parseBTree(fileName)
+            tr := parseBTree(c.fileName)
             if tr != nil {
                 return tr
             }
         }
     }
 
-    btree := BTree{}
-    btree.bplus = bplus
-    btree.fileName = fileName
-    btree.sync = false
-    btree.degree = degree
-    btree.maxPageNo = 0
-    if fileName != "" {
-        btree.sync = true
-        btree.pageSize = 64
-        if degree == 0 {
-            btree.degree = getDegree(btree.pageSize)
-        }
-    }
-    btree.root = btree.newBtreeNode(nil, nil)
-    return &btree
+    t := BTree{}
+    t.btreeConf = c
+    t.root = t.newBtreeNode(nil, nil)
+    return &t
 }
 func (tree *BTree) newBtreeNode(elements []BTreeElem, children []*btreeNode) *btreeNode {
     tree.maxPageNo++
     return &btreeNode{elements, children, tree.maxPageNo, nil, nil}
 }
+func newConf(conf map[string]string) *btreeConf {
+    c := btreeConf{}
+    bplus, ok := conf["bplus"]
+    if ok {
+        c.bplus = bplus == "1"
+    }
+    fileName, ok := conf["fileName"]
+    if ok {
+        c.fileName = fileName
+    }
+    if c.fileName != "" {
+        c.sync = true
+        c.pageSize = 64
+    }
+    sync, ok := conf["sync"]
+    if ok {
+        c.sync = sync == "1"
+    }
+    pageSize, ok := conf["pageSize"]
+    if ok {
+        pageSize1, _ := strconv.Atoi(pageSize)
+        c.pageSize = uint32(pageSize1)
+    }
+    degree, ok := conf["degree"]
+    if ok {
+        degree1, _ := strconv.Atoi(degree)
+        c.degree = degree1
+    }
+    if c.fileName != "" && c.degree == 0 {
+        c.degree = getDegree(c.pageSize)
+    }
+    return &c
+}
+func getDegree(pageSize uint32) int {
+    elementLenSize := uint32(unsafe.Sizeof(elementLenType(0)))
+    keySize := uint32(unsafe.Sizeof(KeyType(0)))
+    pageNoSize := uint32(unsafe.Sizeof(pageNoType(0)))
+    // 2*pageNoSize + elementLenSize + (2*degree-1)*keySize + (2*degree)*pageNoSize <= pageSize
+    degree := int((pageSize - 2*pageNoSize - elementLenSize + keySize) / (2*pageNoSize + 2*keySize))
+    return degree
+}
 
 func (tree *BTree) Add(elements ...BTreeElem) {
     for _, ele := range elements {
         // if the root is full, add a new root
-        if len(tree.root.elements) == 2*tree.degree-1 {
+        if tree.isNodeFull(tree.root, nil) {
             root := tree.root
             tree.root = tree.newBtreeNode(nil, []*btreeNode{root})
         }
@@ -79,7 +119,7 @@ func (tree *BTree) Add(elements ...BTreeElem) {
 func (tree *BTree) addToNonFullNode(ele BTreeElem, node *btreeNode) {
     var i int
     for i = len(node.elements) - 1; i >= 0; i-- {
-        if ele >= node.elements[i] {
+        if ele.compare(node.elements[i]) >= 0 {
             break
         }
     }
@@ -90,15 +130,15 @@ func (tree *BTree) addToNonFullNode(ele BTreeElem, node *btreeNode) {
     }
     degree := tree.degree
     // split the full child, upgrade the mid element of the full child to current node
-    if len(node.children[i+1].elements) == 2*degree-1 {
+    if tree.isNodeFull(node.children[i+1], &ele) {
         fullNode := node.children[i+1]
         midElement := fullNode.elements[degree-1]
         newNode := tree.newBtreeNode(nil, nil)
         // splitting leaf node of B+ tree
         if tree.bplus && fullNode.isLeaf() {
             // leave the mid element to the right child
-            newNode.elements = make([]BTreeElem, degree)
-            copy(newNode.elements, fullNode.elements[degree-1:])
+            newNode.elements = make([]BTreeElem, (len(fullNode.elements)+1)/2)
+            copy(newNode.elements, fullNode.elements[len(fullNode.elements)/2+1:])
 
             // create the linked list
             fullNode.next = newNode
@@ -126,7 +166,7 @@ func (tree *BTree) addToNonFullNode(ele BTreeElem, node *btreeNode) {
         node.elements = append(node.elements[:i+1], append([]BTreeElem{midElement}, node.elements[i+1:]...)...)
         node.children = append(node.children[:i+2], append([]*btreeNode{newNode}, node.children[i+2:]...)...)
 
-        if ele >= node.elements[i+1] {
+        if ele.compare(node.elements[i+1]) >= 0 {
             i++
         }
 
@@ -135,9 +175,6 @@ func (tree *BTree) addToNonFullNode(ele BTreeElem, node *btreeNode) {
         tree.syncNode(newNode)
     }
     tree.addToNonFullNode(ele, node.children[i+1])
-}
-func (node *btreeNode) isLeaf() bool {
-    return len(node.children) == 0
 }
 func (tree *BTree) Rem(elements ...BTreeElem) {
     if len(tree.root.elements) == 0 {
@@ -151,12 +188,12 @@ func (tree *BTree) Rem(elements ...BTreeElem) {
 func (tree *BTree) remFromNode(ele BTreeElem, node *btreeNode) {
     var i int
     for i = len(node.elements) - 1; i >= 0; i-- {
-        if ele >= node.elements[i] {
+        if ele.compare(node.elements[i]) >= 0 {
             break
         }
     }
     if node.isLeaf() {
-        if i >= 0 && ele == node.elements[i] {
+        if i >= 0 && ele.compare(node.elements[i]) == 0 {
             node.elements = append(node.elements[:i], node.elements[i+1:]...)
         }
         tree.syncNode(node)
@@ -164,7 +201,7 @@ func (tree *BTree) remFromNode(ele BTreeElem, node *btreeNode) {
     }
 
     // remove from current node. There is no need to do this for B+ tree
-    if !tree.bplus && i >= 0 && ele == node.elements[i] {
+    if !tree.bplus && i >= 0 && ele.compare(node.elements[i]) == 0 {
         if len(node.children[i].elements) >= tree.degree {
             del := tree.remExtreme(node.children[i], true)
             node.elements[i] = del
@@ -304,17 +341,20 @@ func (tree *BTree) String() string {
             continue
         }
 
-        var s []string
-        for _, v := range q[0].elements {
-            s = append(s, fmt.Sprintf("%d", v))
-        }
-        str += strings.Join(s, ",") + " "
+        str += q[0].String() + " "
         q = append(q[1:], q[0].children...)
         if q[0] == nil {
             q = append(q, nil)
         }
     }
     return str
+}
+func (node *btreeNode) String() string {
+    var s []string
+    for _, v := range node.elements {
+        s = append(s, fmt.Sprintf("%d", v.Key))
+    }
+    return strings.Join(s, ",")
 }
 func (tree *BTree) LeafString() string {
     if !tree.bplus {
@@ -336,14 +376,6 @@ func (tree *BTree) LeafString() string {
     return str
 }
 
-func getDegree(pageSize uint32) int {
-    elementLenSize := uint32(unsafe.Sizeof(elementLenType(0)))
-    elementSize := uint32(unsafe.Sizeof(BTreeElem(0)))
-    pageNoSize := uint32(unsafe.Sizeof(pageNoType(0)))
-    // 2*pageNoSize + elementLenSize + (2*degree-1)*elementSize + (2*degree)*pageNoSize <= pageSize
-    degree := int((pageSize - 2*pageNoSize - elementLenSize + elementSize) / (2*pageNoSize + 2*elementSize))
-    return degree
-}
 func (tree *BTree) syncNode(node *btreeNode) {
     // next(pageNoType) prev(pageNoType) elementLen(elementLenType) element children
     buf := new(bytes.Buffer)
@@ -362,7 +394,7 @@ func (tree *BTree) syncNode(node *btreeNode) {
         binary.Write(buf, binary.LittleEndian, ele)
     }
     if len(node.elements) < 2*tree.degree-1 {
-        zeroLen := (2*tree.degree - 1 - len(node.elements)) * int(unsafe.Sizeof(BTreeElem(0)))
+        zeroLen := (2*tree.degree - 1 - len(node.elements)) * int(unsafe.Sizeof(KeyType(0)))
         binary.Write(buf, binary.LittleEndian, make([]byte, zeroLen))
     }
     for _, child := range node.children {
@@ -375,13 +407,14 @@ func (tree *BTree) syncNode(node *btreeNode) {
     tree.writeAt(buf.Bytes(), int64(uint32(node.pageNo)*tree.pageSize))
 }
 func (tree *BTree) syncMeta() {
-    // magicNumber(uint32) bplus(bool) maxPageNo(pageNoType) rootPageNo(pageNoType) pageSize(uint32)
+    // magicNumber(uint32) bplus(bool) maxPageNo(pageNoType) rootPageNo(pageNoType) pageSize(uint32) degree(uint32)
     buf := new(bytes.Buffer)
     binary.Write(buf, binary.LittleEndian, magicNumber)
     binary.Write(buf, binary.LittleEndian, tree.bplus)
     binary.Write(buf, binary.LittleEndian, tree.maxPageNo)
     binary.Write(buf, binary.LittleEndian, tree.root.pageNo)
     binary.Write(buf, binary.LittleEndian, tree.pageSize)
+    binary.Write(buf, binary.LittleEndian, uint32(tree.degree))
     tree.writeAt(buf.Bytes(), 0)
 }
 /*
@@ -409,6 +442,7 @@ func parseBTree(fileName string) *BTree {
 
     reader := bytes.NewReader(data)
     tr := &BTree{}
+    tr.btreeConf = &btreeConf{}
     var magic uint32
     binary.Read(reader, binary.LittleEndian, &magic)
     if magic != magicNumber {
@@ -419,7 +453,9 @@ func parseBTree(fileName string) *BTree {
     var rootPageNo pageNoType
     binary.Read(reader, binary.LittleEndian, &rootPageNo)
     binary.Read(reader, binary.LittleEndian, &tr.pageSize)
-    tr.degree = getDegree(tr.pageSize)
+    var degree uint32
+    binary.Read(reader, binary.LittleEndian, &degree)
+    tr.degree = int(degree)
     tr.sync = true
     tr.fileName = fileName
     pageNoMap := make([]*btreeNode, tr.maxPageNo+1)
@@ -478,4 +514,43 @@ func (tree *BTree) writeAt(data []byte, offset int64) {
     if err != nil {
         fmt.Println(err)
     }
+}
+
+func (tree *BTree) isNodeFull(node *btreeNode, ele *BTreeElem) bool {
+    if !tree.bplus || !node.isLeaf() {
+        return len(node.elements) == 2*tree.degree-1
+    }
+
+    return tree.pageSize <= node.stringSize() + ele.stringSize()
+}
+func (node *btreeNode) isLeaf() bool {
+    return len(node.children) == 0
+}
+func (node *btreeNode) stringSize() uint32{
+    var size uint32
+    if !node.isLeaf() {
+        return size
+    }
+    elementLenSize := uint32(unsafe.Sizeof(elementLenType(0)))
+    pageNoSize := uint32(unsafe.Sizeof(pageNoType(0)))
+    size += 2*pageNoSize + elementLenSize
+    for _, ele := range node.elements {
+        size += ele.stringSize()
+    }
+    return size
+}
+func (ele BTreeElem) compare(ele1 BTreeElem) int {
+    if ele.Key > ele1.Key {
+        return 1
+    } else if ele.Key == ele1.Key {
+        return 0
+    } else {
+        return -1
+    }
+}
+func (ele *BTreeElem) stringSize() uint32 {
+    if ele == nil {
+        return 0
+    }
+    return uint32(unsafe.Sizeof(ele.Key)) + uint32(unsafe.Sizeof(valueLenType(0))) + uint32(len(ele.Val))
 }

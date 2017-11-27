@@ -5,8 +5,13 @@ import (
     "tree"
 )
 func main() {
-    fileName := "/Users/xp/devspace/data/btree.data"
-    t := tree.NewBTree(true, fileName, 0)
-    //t.Add([]tree.BTreeElem{1,2,3,4,5,6,7,8,9}...)
+    conf := make(map[string]string)
+    conf["bplus"] = "0"
+    conf["fileName"] = "/Users/xp/devspace/data/btree.data"
+    conf["sync"] = "0"
+    t := tree.NewBTree(conf)
+    for i := 0; i < 10; i++ {
+        t.Add(tree.BTreeElem{tree.KeyType(i),nil})
+    }
     fmt.Println(t.String())
 }
