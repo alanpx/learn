@@ -17,6 +17,7 @@ type BTree struct {
     *btreeConf
     root      *btreeNode
     maxPageNo pageNoType
+    dirtyNode map[pageNoType]*btreeNode
 }
 type btreeConf struct {
     bplus    bool // is B+ tree
@@ -43,12 +44,12 @@ type elementLenType uint32 // node elements length type on disk
 type valueLenType uint32
 type pageNoType uint32
 
-func NewBTree(conf map[string]string) *BTree {
+func NewBTree(conf map[string]string, parseAll bool) *BTree {
     c := newConf(conf)
     if c.fileName != "" {
         _, err := os.Stat(c.fileName)
         if err == nil {
-            tr := parseBTree(c.fileName, true, c.pageSize)
+            tr := parseBTree(c.fileName, parseAll, c.pageSize)
             if tr != nil {
                 return tr
             }
@@ -58,6 +59,7 @@ func NewBTree(conf map[string]string) *BTree {
     t := BTree{}
     t.btreeConf = c
     t.root = t.newBtreeNode(nil, nil)
+    t.dirtyNode = make(map[pageNoType]*btreeNode)
     return &t
 }
 func (tree *BTree) newBtreeNode(elements []BTreeElem, children []*btreeNode) *btreeNode {
@@ -81,7 +83,7 @@ func newConf(conf map[string]string) *btreeConf {
     }
     if c.fileName != "" {
         c.sync = true
-        c.pageSize = 64
+        c.pageSize = 8*1024
     }
     sync, ok := conf["sync"]
     if ok {
@@ -124,7 +126,7 @@ func (tree *BTree) Add(elements ...BTreeElem) {
         }
         tree.addToNonFullNode(ele, tree.root)
     }
-    tree.syncMeta()
+    tree.syncAll()
 }
 func (tree *BTree) addToNonFullNode(ele BTreeElem, node *btreeNode) {
     var i int
@@ -135,7 +137,7 @@ func (tree *BTree) addToNonFullNode(ele BTreeElem, node *btreeNode) {
     }
     if node.isLeaf() {
         node.elements = append(node.elements[:i+1], append([]BTreeElem{ele}, node.elements[i+1:]...)...)
-        tree.syncNode(node)
+        tree.dirtyNode[node.pageNo] = node
         return
     }
     degree := tree.degree
@@ -184,9 +186,9 @@ func (tree *BTree) addToNonFullNode(ele BTreeElem, node *btreeNode) {
             i++
         }
 
-        tree.syncNode(node)
-        tree.syncNode(fullNode)
-        tree.syncNode(newNode)
+        tree.dirtyNode[node.pageNo] = node
+        tree.dirtyNode[fullNode.pageNo] = fullNode
+        tree.dirtyNode[newNode.pageNo] = newNode
     }
     tree.addToNonFullNode(ele, node.children[i+1])
 }
@@ -197,7 +199,7 @@ func (tree *BTree) Rem(elements ...BTreeElem) {
     for _, ele := range elements {
         tree.remFromNode(ele, tree.root)
     }
-    tree.syncMeta()
+    tree.syncAll()
 }
 func (tree *BTree) remFromNode(ele BTreeElem, node *btreeNode) {
     var i int
@@ -210,7 +212,7 @@ func (tree *BTree) remFromNode(ele BTreeElem, node *btreeNode) {
         if i >= 0 && ele.compare(node.elements[i]) == 0 {
             node.elements = append(node.elements[:i], node.elements[i+1:]...)
         }
-        tree.syncNode(node)
+        tree.dirtyNode[node.pageNo] = node
         return
     }
 
@@ -226,7 +228,7 @@ func (tree *BTree) remFromNode(ele BTreeElem, node *btreeNode) {
             tree.mergeChildren(node, i)
             tree.remFromNode(ele, node.children[i])
         }
-        tree.syncNode(node)
+        tree.dirtyNode[node.pageNo] = node
         return
     }
 
@@ -265,7 +267,7 @@ func (tree *BTree) remExtreme(node *btreeNode, isMax bool) BTreeElem {
             ele = node.elements[0]
             node.elements = node.elements[1:]
         }
-        tree.syncNode(node)
+        tree.dirtyNode[node.pageNo] = node
         return ele
     }
 
@@ -303,8 +305,8 @@ func (tree *BTree) mergeChildren(node *btreeNode, i int) {
     if node == tree.root && len(node.elements) == 0 {
         tree.root = tree.root.children[0]
     }
-    tree.syncNode(node)
-    tree.syncNode(node.children[i])
+    tree.dirtyNode[node.pageNo] = node
+    tree.dirtyNode[node.children[i].pageNo] = node.children[i]
 }
 func (tree *BTree) balanceChild(node *btreeNode, from int, to int) {
     if from-to != 1 && to-from != 1 {
@@ -339,14 +341,15 @@ func (tree *BTree) balanceChild(node *btreeNode, from int, to int) {
             f.children = f.children[1:]
         }
     }
-    tree.syncNode(node)
-    tree.syncNode(f)
-    tree.syncNode(t)
+    tree.dirtyNode[node.pageNo] = node
+    tree.dirtyNode[f.pageNo] = f
+    tree.dirtyNode[t.pageNo] = t
 }
 func (tree *BTree) Get(key KeyType) []BTreeElem {
     var re []BTreeElem
     node := tree.root
     for node != nil {
+        tree.loadNode(node)
         var i int
         for i = 0; i < len(node.elements); i++ {
             if node.elements[i].compareKey(key) == 0 {
@@ -373,10 +376,13 @@ func (tree *BTree) Get(key KeyType) []BTreeElem {
 func (tree *BTree) GetByCond(cond func(BTreeElem) bool) []BTreeElem {
     var re []BTreeElem
     node := tree.root
+    tree.loadNode(node)
     for !node.isLeaf() {
         node = node.children[0]
+        tree.loadNode(node)
     }
     for node != nil {
+        tree.loadNode(node)
         for i := 0; i < len(node.elements); i++ {
             if cond(node.elements[i]) {
                 re = append(re, node.elements[i])
@@ -437,7 +443,7 @@ func (tree *BTree) LeafString() string {
     return str
 }
 
-func (tree *BTree) syncNode(node *btreeNode) {
+func (tree *BTree) serializeNode(node *btreeNode) (int64, []byte) {
     // common: isLeaf(bool) prev(pageNoType) next(pageNoType) elementLen(elementLenType)
     // b+ tree leaf node: element.Key element.ValLen(valueLenType) element.Val
     // else: element.Key children(pageNoType)
@@ -478,9 +484,9 @@ func (tree *BTree) syncNode(node *btreeNode) {
         zeroLen := tree.pageSize - uint32(buf.Len())
         binary.Write(buf, binary.LittleEndian, make([]byte, zeroLen))
     }
-    tree.writeAt(buf.Bytes(), int64(uint32(node.pageNo)*tree.pageSize))
+    return int64(uint32(node.pageNo)*tree.pageSize), buf.Bytes()
 }
-func (tree *BTree) syncMeta() {
+func (tree *BTree) serializeMeta() (int64, []byte) {
     // magicNumber(uint32) bplus(bool) maxPageNo(pageNoType) rootPageNo(pageNoType) pageSize(uint32) degree(uint32)
     buf := new(bytes.Buffer)
     binary.Write(buf, binary.LittleEndian, magicNumber)
@@ -489,7 +495,20 @@ func (tree *BTree) syncMeta() {
     binary.Write(buf, binary.LittleEndian, tree.root.pageNo)
     binary.Write(buf, binary.LittleEndian, tree.pageSize)
     binary.Write(buf, binary.LittleEndian, uint32(tree.degree))
-    tree.writeAt(buf.Bytes(), 0)
+    return 0, buf.Bytes()
+}
+func (tree *BTree) syncAll() {
+    if !tree.sync {
+        return
+    }
+    allData := make(map[int64][]byte)
+    for _, node := range tree.dirtyNode {
+        offset, data := tree.serializeNode(node)
+        allData[offset] = data
+    }
+    offset, data := tree.serializeMeta()
+    allData[offset] = data
+    tree.writeToDisk(allData)
 }
 
 /*
@@ -518,7 +537,7 @@ func parseBTree(fileName string, parseAll bool, pageSize uint32) *BTree {
             return nil
         }
     } else {
-        data = make([]byte, 2*pageSize)
+        data = make([]byte, pageSize)
         file.Read(data)
     }
 
@@ -540,8 +559,14 @@ func parseBTree(fileName string, parseAll bool, pageSize uint32) *BTree {
     tr.degree = int(degree)
     tr.sync = true
     tr.fileName = fileName
-    pageNoMap := make([]*btreeNode, tr.maxPageNo+1)
-    tr.root = tr.parseNode(data, rootPageNo, parseAll, pageNoMap)
+    if parseAll {
+        pageNoMap := make([]*btreeNode, tr.maxPageNo+1)
+        tr.root = tr.parseNode(data, rootPageNo, parseAll, pageNoMap)
+    } else {
+        tr.root = &btreeNode{}
+        tr.root.pageNo = rootPageNo
+    }
+    tr.dirtyNode = make(map[pageNoType]*btreeNode)
     return tr
 }
 func (tree *BTree) parseNode(data []byte, pageNo pageNoType, parseAll bool, pageNoMap []*btreeNode) *btreeNode {
@@ -550,10 +575,15 @@ func (tree *BTree) parseNode(data []byte, pageNo pageNoType, parseAll bool, page
     }
 
     node := &btreeNode{}
-    pageNoMap[pageNo] = node
+    if parseAll {
+        pageNoMap[pageNo] = node
+    }
     node.pageNo = pageNo
-    reader := bytes.NewReader(data[:tree.pageSize])
-    data = data[tree.pageSize:]
+    parseData := data
+    if parseAll {
+        parseData = data[tree.pageSize*uint32(pageNo):tree.pageSize*(uint32(pageNo)+1)]
+    }
+    reader := bytes.NewReader(parseData)
     var isLeaf bool
     binary.Read(reader, binary.LittleEndian, &isLeaf)
     var prev, next pageNoType
@@ -574,7 +604,7 @@ func (tree *BTree) parseNode(data []byte, pageNo pageNoType, parseAll bool, page
         } else {
             nextNode := btreeNode{}
             nextNode.pageNo = next
-            node.prev = &nextNode
+            node.next = &nextNode
         }
     }
     var eleLen elementLenType
@@ -610,18 +640,17 @@ func (tree *BTree) parseNode(data []byte, pageNo pageNoType, parseAll bool, page
     }
     return node
 }
-func (tree *BTree) writeAt(data []byte, offset int64) {
-    if !tree.sync {
-        return
-    }
+func (tree *BTree) writeToDisk(data map[int64][]byte) {
     file, err := os.OpenFile(tree.fileName, os.O_WRONLY|os.O_CREATE, 0666)
     if err != nil {
         fmt.Println(err)
     }
     defer file.Close()
-    _, err = file.WriteAt(data, offset)
-    if err != nil {
-        fmt.Println(err)
+    for offset, d := range data {
+        _, err = file.WriteAt(d, offset)
+        if err != nil {
+            fmt.Println(err)
+        }
     }
 }
 
@@ -640,9 +669,10 @@ func (tree *BTree) loadNode(node *btreeNode) {
             return
         }
         defer file.Close()
-        data := make([]byte, 2*tree.pageSize)
-        file.Read(data)
+        data := make([]byte, tree.pageSize)
+        file.ReadAt(data, int64(tree.pageSize)*int64(node.pageNo))
         *node = *tree.parseNode(data, node.pageNo, false, nil)
+        node.hasLoaded = true
     }
 }
 func (node *btreeNode) isLeaf() bool {
