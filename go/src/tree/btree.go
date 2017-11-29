@@ -9,6 +9,7 @@ import (
     "encoding/binary"
     "io/ioutil"
     "strconv"
+    "io"
 )
 
 const magicNumber uint32 = 0x42e09ad3 // to detect B tree data file
@@ -586,33 +587,35 @@ func (tree *BTree) parseNode(data []byte, pageNo pageNoType, parseAll bool, page
     reader := bytes.NewReader(parseData)
     var isLeaf bool
     binary.Read(reader, binary.LittleEndian, &isLeaf)
-    var prev, next pageNoType
-    binary.Read(reader, binary.LittleEndian, &prev)
-    binary.Read(reader, binary.LittleEndian, &next)
-    if prev > 0 {
+    var prevPageNo, nextPageNo pageNoType
+    binary.Read(reader, binary.LittleEndian, &prevPageNo)
+    binary.Read(reader, binary.LittleEndian, &nextPageNo)
+    if prevPageNo > 0 {
         if parseAll {
-            node.prev = tree.parseNode(data, prev, parseAll, pageNoMap)
+            node.prev = tree.parseNode(data, prevPageNo, parseAll, pageNoMap)
         } else {
             prevNode := btreeNode{}
-            prevNode.pageNo = prev
+            prevNode.pageNo = prevPageNo
             node.prev = &prevNode
         }
     }
-    if next > 0 {
+    if nextPageNo > 0 {
         if parseAll {
-            node.next = tree.parseNode(data, next, parseAll, pageNoMap)
+            node.next = tree.parseNode(data, nextPageNo, parseAll, pageNoMap)
         } else {
             nextNode := btreeNode{}
-            nextNode.pageNo = next
+            nextNode.pageNo = nextPageNo
             node.next = &nextNode
         }
     }
+
     var eleLen elementLenType
     binary.Read(reader, binary.LittleEndian, &eleLen)
-    ele := BTreeElem{}
-    for i := 1; i <= 2*tree.degree-1; i++ {
-        binary.Read(reader, binary.LittleEndian, &ele.Key)
-        if tree.bplus && isLeaf {
+    var ele BTreeElem
+    if tree.bplus && isLeaf {
+        for i := elementLenType(1); i <= eleLen; i++ {
+            ele = BTreeElem{}
+            binary.Read(reader, binary.LittleEndian, &ele.Key)
             var valLen valueLenType
             binary.Read(reader, binary.LittleEndian, &valLen)
             var val byte
@@ -620,21 +623,27 @@ func (tree *BTree) parseNode(data []byte, pageNo pageNoType, parseAll bool, page
                 binary.Read(reader, binary.LittleEndian, &val)
                 ele.Val = append(ele.Val, val)
             }
-        }
-        if i <= int(eleLen) {
             node.elements = append(node.elements, ele)
         }
-    }
-    if !isLeaf {
-        var child pageNoType
-        for i := elementLenType(1); i <= eleLen+1; i++ {
-            binary.Read(reader, binary.LittleEndian, &child)
-            if parseAll {
-                node.children = append(node.children, tree.parseNode(data, child, parseAll, pageNoMap))
-            } else {
-                childNode := btreeNode{}
-                childNode.pageNo = child
-                node.children = append(node.children, &childNode)
+    } else {
+        for i := elementLenType(1); i <= eleLen; i++ {
+            ele = BTreeElem{}
+            binary.Read(reader, binary.LittleEndian, &ele.Key)
+            node.elements = append(node.elements, ele)
+        }
+        if !isLeaf {
+            offset := (2*int64(tree.degree) - 1 - int64(eleLen)) * int64(unsafe.Sizeof(KeyType(0)))
+            reader.Seek(offset, io.SeekCurrent)
+            var childPageNo pageNoType
+            for i := elementLenType(1); i <= eleLen+1; i++ {
+                binary.Read(reader, binary.LittleEndian, &childPageNo)
+                if parseAll {
+                    node.children = append(node.children, tree.parseNode(data, childPageNo, parseAll, pageNoMap))
+                } else {
+                    childNode := btreeNode{}
+                    childNode.pageNo = childPageNo
+                    node.children = append(node.children, &childNode)
+                }
             }
         }
     }
@@ -658,7 +667,6 @@ func (tree *BTree) isNodeFull(node *btreeNode, ele *BTreeElem) bool {
     if !tree.bplus || !node.isLeaf() {
         return len(node.elements) == 2*tree.degree-1
     }
-
     return tree.pageSize <= node.stringSize()+ele.stringSize()
 }
 func (tree *BTree) loadNode(node *btreeNode) {
