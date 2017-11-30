@@ -12,7 +12,10 @@ import (
     "io"
 )
 
-const magicNumber uint32 = 0x42e09ad3 // to detect B tree data file
+const (
+    magicNumber  uint32 = 0x42e09ad3 // to detect B tree data file
+    metaNodeSize uint32 = 21
+)
 
 type BTree struct {
     *btreeConf
@@ -32,8 +35,8 @@ type btreeNode struct {
     children []*btreeNode
     pageNo   pageNoType
     // "prev" and "next" are used to create a linked list of leaf node of B+ tree
-    prev *btreeNode
-    next *btreeNode
+    prev      *btreeNode
+    next      *btreeNode
     hasLoaded bool // has been loaded from disk
 }
 type BTreeElem struct {
@@ -45,18 +48,8 @@ type elementLenType uint32 // node elements length type on disk
 type valueLenType uint32
 type pageNoType uint32
 
-func NewBTree(conf map[string]string, parseAll bool) *BTree {
+func NewBTree(conf map[string]string) *BTree {
     c := newConf(conf)
-    if c.fileName != "" {
-        _, err := os.Stat(c.fileName)
-        if err == nil {
-            tr := parseBTree(c.fileName, parseAll, c.pageSize)
-            if tr != nil {
-                return tr
-            }
-        }
-    }
-
     t := BTree{}
     t.btreeConf = c
     t.root = t.newBtreeNode(nil, nil)
@@ -84,7 +77,7 @@ func newConf(conf map[string]string) *btreeConf {
     }
     if c.fileName != "" {
         c.sync = true
-        c.pageSize = 8*1024
+        c.pageSize = 8 * 1024
     }
     sync, ok := conf["sync"]
     if ok {
@@ -114,22 +107,57 @@ func getDegree(pageSize uint32) int {
     return degree
 }
 
+/*
+ * Build tree from SORTED elements.
+ * Reference: Mysql's sorted index builds.
+ */
+func (tree *BTree) BulkBuild(sortedElements ...BTreeElem) {
+    // store the right-most node at all levels
+    nodeStack := []*btreeNode{tree.root}
+    leaf := tree.newBtreeNode(nil, nil)
+    for _, ele := range sortedElements {
+        if leaf.stringSize()+ele.stringSize() < tree.pageSize {
+            leaf.elements = append(leaf.elements, ele)
+            continue
+        }
+        node := nodeStack[len(nodeStack)-1]
+        node.elements = append(node.elements, leaf.elements[0])
+        node.children = append(node.children, leaf)
+        leaf = tree.newBtreeNode(nil, nil)
+        if !tree.isNodeFull(node) {
+            continue
+        }
+        if len(nodeStack) == 1 {
+            root := tree.root
+            tree.root = tree.newBtreeNode(nil, []*btreeNode{root})
+            tree.splitChild(tree.root, 0)
+        }
+        var parent *btreeNode
+        for i:= len(nodeStack) - 2
+        for tree.isNodeFull(node) {
+            if len(nodeStack) == 1 {
+                root := tree.root
+                tree.root = tree.newBtreeNode(nil, []*btreeNode{root})
+                tree.splitChild(tree.root, 0)
+                break
+            }
+            parent = nodeStack[len(nodeStack)-2]
+            tree.splitChild(parent, len(parent.children)-1)
+
+        }
+    }
+}
 func (tree *BTree) Add(elements ...BTreeElem) {
     for _, ele := range elements {
         // there is no meaning for B tree to store data, just ignore it
         if !tree.bplus {
             ele.Val = nil
         }
-        // if the root is full, add a new root
-        if tree.isNodeFull(tree.root, nil) {
-            root := tree.root
-            tree.root = tree.newBtreeNode(nil, []*btreeNode{root})
-        }
-        tree.addToNonFullNode(ele, tree.root)
+        tree.addToNode(ele, tree.root)
     }
     tree.syncAll()
 }
-func (tree *BTree) addToNonFullNode(ele BTreeElem, node *btreeNode) {
+func (tree *BTree) addToNode(ele BTreeElem, node *btreeNode) {
     var i int
     for i = len(node.elements) - 1; i >= 0; i-- {
         if ele.compare(node.elements[i]) >= 0 {
@@ -139,59 +167,17 @@ func (tree *BTree) addToNonFullNode(ele BTreeElem, node *btreeNode) {
     if node.isLeaf() {
         node.elements = append(node.elements[:i+1], append([]BTreeElem{ele}, node.elements[i+1:]...)...)
         tree.dirtyNode[node.pageNo] = node
-        return
+    } else {
+        tree.addToNode(ele, node.children[i+1])
+        if tree.isNodeFull(node.children[i+1]) {
+            tree.splitChild(node, i+1)
+        }
     }
-    degree := tree.degree
-    // split the full child, upgrade the mid element of the full child to current node
-    if tree.isNodeFull(node.children[i+1], &ele) {
-        fullNode := node.children[i+1]
-        midElement := fullNode.elements[len(fullNode.elements)/2]
-        // for B+ tree inner node, only keep the key
-        if tree.bplus {
-            midElement = BTreeElem{midElement.Key, nil}
-        }
-        newNode := tree.newBtreeNode(nil, nil)
-        // splitting leaf node of B+ tree
-        if tree.bplus && fullNode.isLeaf() {
-            // leave the mid element to the right child
-            newNode.elements = make([]BTreeElem, (len(fullNode.elements)+1)/2)
-            copy(newNode.elements, fullNode.elements[len(fullNode.elements)/2:])
-
-            // create the linked list
-            fullNode.next = newNode
-            newNode.prev = fullNode
-            if i >= 0 {
-                node.children[i].next = fullNode
-                fullNode.prev = node.children[i]
-            }
-            if i+2 < len(node.children) {
-                newNode.next = node.children[i+2]
-                node.children[i+2].prev = newNode
-            }
-        } else {
-            newNode.elements = make([]BTreeElem, degree-1)
-            copy(newNode.elements, fullNode.elements[degree:])
-        }
-        fullNode.elements = fullNode.elements[:len(fullNode.elements)/2]
-
-        if !fullNode.isLeaf() {
-            newNode.children = make([]*btreeNode, degree)
-            copy(newNode.children, fullNode.children[degree:])
-            fullNode.children = fullNode.children[:degree]
-        }
-
-        node.elements = append(node.elements[:i+1], append([]BTreeElem{midElement}, node.elements[i+1:]...)...)
-        node.children = append(node.children[:i+2], append([]*btreeNode{newNode}, node.children[i+2:]...)...)
-
-        if ele.compare(node.elements[i+1]) >= 0 {
-            i++
-        }
-
-        tree.dirtyNode[node.pageNo] = node
-        tree.dirtyNode[fullNode.pageNo] = fullNode
-        tree.dirtyNode[newNode.pageNo] = newNode
+    if node == tree.root && tree.isNodeFull(node) {
+        root := tree.root
+        tree.root = tree.newBtreeNode(nil, []*btreeNode{root})
+        tree.splitChild(tree.root, 0)
     }
-    tree.addToNonFullNode(ele, node.children[i+1])
 }
 func (tree *BTree) Rem(elements ...BTreeElem) {
     if len(tree.root.elements) == 0 {
@@ -485,7 +471,7 @@ func (tree *BTree) serializeNode(node *btreeNode) (int64, []byte) {
         zeroLen := tree.pageSize - uint32(buf.Len())
         binary.Write(buf, binary.LittleEndian, make([]byte, zeroLen))
     }
-    return int64(uint32(node.pageNo)*tree.pageSize), buf.Bytes()
+    return int64(uint32(node.pageNo) * tree.pageSize), buf.Bytes()
 }
 func (tree *BTree) serializeMeta() (int64, []byte) {
     // magicNumber(uint32) bplus(bool) maxPageNo(pageNoType) rootPageNo(pageNoType) pageSize(uint32) degree(uint32)
@@ -520,7 +506,7 @@ func (tree *BTree) syncAll() {
  * But keep all the (partly) parsed nodes in a map.
  * We take the second option, the more general one.
  */
-func parseBTree(fileName string, parseAll bool, pageSize uint32) *BTree {
+func ParseBTree(fileName string, parseAll bool) *BTree {
     if fileName == "" {
         return nil
     }
@@ -538,7 +524,7 @@ func parseBTree(fileName string, parseAll bool, pageSize uint32) *BTree {
             return nil
         }
     } else {
-        data = make([]byte, pageSize)
+        data = make([]byte, metaNodeSize)
         file.Read(data)
     }
 
@@ -663,11 +649,60 @@ func (tree *BTree) writeToDisk(data map[int64][]byte) {
     }
 }
 
-func (tree *BTree) isNodeFull(node *btreeNode, ele *BTreeElem) bool {
+func (tree *BTree) isNodeFull(node *btreeNode) bool {
     if !tree.bplus || !node.isLeaf() {
-        return len(node.elements) == 2*tree.degree-1
+        return len(node.elements) > 2*tree.degree-1
     }
-    return tree.pageSize <= node.stringSize()+ele.stringSize()
+    return tree.pageSize < node.stringSize()
+}
+func (tree *BTree) splitChild(node *btreeNode, childIdx int) *btreeNode {
+    fullNode := node.children[childIdx]
+    var midIdx int
+    newNode := tree.newBtreeNode(nil, nil)
+    if !tree.bplus || !fullNode.isLeaf() {
+        midIdx = len(fullNode.elements)/2
+        newNode.elements = make([]BTreeElem, len(fullNode.elements)-1-midIdx)
+        copy(newNode.elements, fullNode.elements[midIdx+1:])
+    } else {
+        // leave redundant elements to the newly created node
+        var excessSize uint32
+        var i int
+        for i = len(fullNode.elements)-1; i >= 0; i-- {
+            excessSize += fullNode.elements[i].stringSize()
+            if fullNode.stringSize() - excessSize <= tree.pageSize {
+                break
+            }
+        }
+        midIdx = i
+        newNode.elements = make([]BTreeElem, len(fullNode.elements)-midIdx)
+        copy(newNode.elements, fullNode.elements[midIdx:])
+
+        // maintain linked list
+        fullNode.next = newNode
+        newNode.prev = fullNode
+        if childIdx+1 < len(node.children) {
+            newNode.next = node.children[childIdx+1]
+            node.children[childIdx+1].prev = newNode
+        }
+    }
+
+    midElement := fullNode.elements[midIdx]
+    midElement.Val = nil
+    fullNode.elements = fullNode.elements[:midIdx]
+
+    if !fullNode.isLeaf() {
+        newNode.children = make([]*btreeNode, len(fullNode.elements)-midIdx)
+        copy(newNode.children, fullNode.children[midIdx+1:])
+        fullNode.children = fullNode.children[:midIdx+1]
+    }
+
+    node.elements = append(node.elements[:childIdx], append([]BTreeElem{midElement}, node.elements[childIdx:]...)...)
+    node.children = append(node.children[:childIdx+1], append([]*btreeNode{newNode}, node.children[childIdx+1:]...)...)
+
+    tree.dirtyNode[node.pageNo] = node
+    tree.dirtyNode[fullNode.pageNo] = fullNode
+    tree.dirtyNode[newNode.pageNo] = newNode
+    return newNode
 }
 func (tree *BTree) loadNode(node *btreeNode) {
     if !node.hasLoaded {
