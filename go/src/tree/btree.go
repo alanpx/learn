@@ -114,38 +114,47 @@ func getDegree(pageSize uint32) int {
 func (tree *BTree) BulkBuild(sortedElements ...BTreeElem) {
     // store the right-most node at all levels
     nodeStack := []*btreeNode{tree.root}
+    var node *btreeNode
     leaf := tree.newBtreeNode(nil, nil)
     for _, ele := range sortedElements {
         if leaf.stringSize()+ele.stringSize() < tree.pageSize {
             leaf.elements = append(leaf.elements, ele)
             continue
         }
-        node := nodeStack[len(nodeStack)-1]
-        node.elements = append(node.elements, leaf.elements[0])
+        node = nodeStack[len(nodeStack)-1]
+        if len(node.children) > 0 {
+            node.elements = append(node.elements, BTreeElem{leaf.elements[0].Key, nil})
+        }
         node.children = append(node.children, leaf)
+        tree.dirtyNode[node.pageNo] = node
+        tree.dirtyNode[leaf.pageNo] = leaf
         leaf = tree.newBtreeNode(nil, nil)
+        leaf.elements = append(leaf.elements, ele)
         if !tree.isNodeFull(node) {
             continue
         }
         if len(nodeStack) == 1 {
             root := tree.root
             tree.root = tree.newBtreeNode(nil, []*btreeNode{root})
-            tree.splitChild(tree.root, 0)
+            nodeStack = append([]*btreeNode{tree.root}, nodeStack...)
         }
-        var parent *btreeNode
-        for i:= len(nodeStack) - 2
-        for tree.isNodeFull(node) {
-            if len(nodeStack) == 1 {
-                root := tree.root
-                tree.root = tree.newBtreeNode(nil, []*btreeNode{root})
-                tree.splitChild(tree.root, 0)
-                break
+        for i:= len(nodeStack) - 2; i >= 0; i-- {
+            if tree.isNodeFull(nodeStack[i+1]) {
+                newNode := tree.splitChild(nodeStack[i], len(nodeStack[i].elements))
+                nodeStack[i+1] = newNode
             }
-            parent = nodeStack[len(nodeStack)-2]
-            tree.splitChild(parent, len(parent.children)-1)
-
         }
     }
+    if len(leaf.elements) > 0 {
+        node = nodeStack[len(nodeStack)-1]
+        if len(node.children) > 0 {
+            node.elements = append(node.elements, BTreeElem{leaf.elements[0].Key, nil})
+        }
+        node.children = append(node.children, leaf)
+        tree.dirtyNode[node.pageNo] = node
+        tree.dirtyNode[leaf.pageNo] = leaf
+    }
+    tree.syncAll()
 }
 func (tree *BTree) Add(elements ...BTreeElem) {
     for _, ele := range elements {
