@@ -37,7 +37,6 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	var wg sync.WaitGroup
 	for i := 0; i < ntasks; i++ {
-        worker := <-registerChan
         args := new(DoTaskArgs)
         args.JobName = jobName
         if phase == mapPhase {
@@ -48,8 +47,11 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
         args.NumOtherPhase = n_other
         wg.Add(1)
         go func() {
-            defer wg.Done()
-            call(worker, "Worker.DoTask", args, new(struct{}))
+            worker := <-registerChan
+            for (!call(worker, "Worker.DoTask", args, new(struct{}))) {
+                worker = <-registerChan
+            }
+            wg.Done()
             registerChan <- worker
         }()
     }
