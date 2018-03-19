@@ -18,7 +18,10 @@ package raft
 //
 
 import "sync"
-import "labrpc"
+import (
+	"6.824/labrpc"
+	"time"
+)
 
 // import "bytes"
 // import "encoding/gob"
@@ -50,7 +53,34 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// persistent state on all servers
+	state serverState
+	currentTerm int
+	votedFor int
+	log []Log
+
+	// volatile state on all servers
+	commitIndex int
+	lastApplied int
+
+	// volatile state on leaders
+	nextIndex []int
+	matchIndex []int
 }
+
+type Log struct {
+	Term int
+	Content string
+}
+
+type serverState int
+
+const (
+	follower serverState = 0
+	leader               = 1
+	candidate            = 3
+	heartBeatInterval    = 120
+)
 
 // return currentTerm and whether this server
 // believes it is the leader.
@@ -102,6 +132,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term int
+	CandidateId int
+	LastLogIndex int
+	LastLogTerm int
 }
 
 //
@@ -110,6 +144,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term int
+	VoteGranted bool
 }
 
 //
@@ -153,6 +189,28 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+type AppendEntriesArgs struct {
+	Term int
+	LeaderId int
+	PrevLogIndex int
+	PrevLogTerm int
+	Entries []Log
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *RequestVoteReply) {
+
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -207,10 +265,28 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.state = follower
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	if rf.state == leader {
+		for {
+			for i := 0; i < len(peers); i++ {
+				if i == me {
+					continue
+				}
+				go func(server int) {
+					args := new(AppendEntriesArgs)
+					args.Term = rf.currentTerm
+					args.LeaderId = rf.me
+					reply := new(AppendEntriesReply)
+					rf.sendAppendEntries(server, args, reply)
+				}(i)
+			}
+			time.Sleep(time.Duration(heartBeatInterval*time.Millisecond))
+		}
+	}
 
 	return rf
 }
