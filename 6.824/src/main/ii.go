@@ -16,8 +16,14 @@ import (
 func mapF(document string, value string) (res []mapreduce.KeyValue) {
 	// TODO: you should complete this to do the inverted index challenge
 	word := strings.FieldsFunc(value, func(r rune) bool { return !unicode.IsLetter(r) })
-    var kv []mapreduce.KeyValue
-    for _, k := range word {
+    m := make(map[string]bool)
+    for _, v := range word {
+        if !m[v] {
+            m[v] = true
+        }
+    }
+	var kv []mapreduce.KeyValue
+    for k := range m {
         kv = append(kv, mapreduce.KeyValue{Key:k, Value:document})
     }
     return kv
@@ -35,8 +41,8 @@ func reduceF(key string, values []string) string {
         }
     }
     var vals []string
-    for v := range m {
-        vals = append(vals, v)
+    for k := range m {
+        vals = append(vals, k)
     }
     sort.Strings(vals)
 	return fmt.Sprintf("%d %s", len(vals), strings.Join(vals, ","))
