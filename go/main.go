@@ -6,6 +6,8 @@ import (
 )
 
 func main() {
+}
+func selectProblem() {
     a := 0
     go func() {
         time.Sleep(1500 * time.Millisecond)

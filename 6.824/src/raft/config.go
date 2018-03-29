@@ -206,7 +206,7 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	// fmt.Printf("connect(%d)\n", i)
+	DPrintf("connect(%d)\n", i)
 
 	cfg.connected[i] = true
 
@@ -229,7 +229,7 @@ func (cfg *config) connect(i int) {
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
-	// fmt.Printf("disconnect(%d)\n", i)
+	DPrintf("disconnect(%d)\n", i)
 
 	cfg.connected[i] = false
 
@@ -283,11 +283,12 @@ func (cfg *config) checkOneLeader() int {
 			}
 			if t > lastTermWithLeader {
 				lastTermWithLeader = t
-			}
+            }
 		}
 
 		if len(leaders) != 0 {
-			return leaders[lastTermWithLeader][0]
+            DPrintf("[checkOneLeader] term: %d, leader: %d", lastTermWithLeader, leaders[lastTermWithLeader][0])
+            return leaders[lastTermWithLeader][0]
 		}
 	}
 	cfg.t.Fatalf("expected one leader, got none")
@@ -320,6 +321,7 @@ func (cfg *config) checkNoLeader() {
 			}
 		}
 	}
+    DPrintf("[checkNoLeader]")
 }
 
 // how many servers think a log entry is committed?
