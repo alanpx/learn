@@ -74,6 +74,7 @@ type Raft struct {
 	beLeader      chan bool
     beFollower    chan bool  // becoming follower from leader
     electionDone  chan bool  // becoming follower from candidate
+    electionCount int32      // a candidate become follower when the election count is 0
     done          int32      // raft instance die
 }
 
@@ -171,7 +172,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
     reply.Term = rf.currentTerm
     reply.VoteGranted = false
+    msg := fmt.Sprintf("[RequestVote] server: %+v, args: %+v, reply: %+v", struct{term, me int}{rf.currentTerm,rf.me}, *args, *reply)
     if args.Term < rf.currentTerm {
+        DPrintf(msg)
         return
     }
     if args.Term > rf.currentTerm || rf.votedFor == args.CandidateId {
@@ -192,6 +195,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
             }
         }
     }
+    DPrintf(msg)
 }
 
 //
@@ -224,10 +228,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+    msg := fmt.Sprintf("[sendRequestVote] server: %+v, to: %d, args: %+v", struct{term, me int}{rf.currentTerm,rf.me}, server, *args)
+    DPrintf(msg)
+    ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+    msg += fmt.Sprintf(", reply: %+v, ok: %v", *reply, ok)
+    DPrintf(msg)
     rf.mu.Lock()
     defer rf.mu.Unlock()
-	DPrintf("[sendRequestVote] server: %+v, to: %d, args: %+v, reply: %+v, ok: %v", struct{term, me int}{rf.currentTerm,rf.me}, server, *args, *reply, ok)
+    if !ok {
+        return ok
+    }
     if rf.currentTerm < reply.Term {
         rf.currentTerm = reply.Term
         if rf.state != follower {
@@ -262,7 +272,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     defer rf.mu.Unlock()
     reply.Term = rf.currentTerm
     reply.Success = false
+    msg := fmt.Sprintf("[AppendEntries] server: %+v, args: %+v, reply: %+v", struct{term, me int}{rf.currentTerm,rf.me}, *args, *reply)
     if args.Term < rf.currentTerm {
+        DPrintf(msg)
         return
     }
     if args.Term > rf.currentTerm {
@@ -278,13 +290,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     }
     reply.Success = true
     rf.electionTimer.Reset(getElectionTimeout())
+    DPrintf(msg)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+    msg := fmt.Sprintf("[sendAppendEntries] server: %+v, to: %d, args: %+v", struct{term, me int}{rf.currentTerm,rf.me}, server, *args)
+    DPrintf(msg)
+    ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+    msg += fmt.Sprintf(", reply: %+v, ok: %v", *reply, ok)
+    DPrintf(msg)
     rf.mu.Lock()
     defer rf.mu.Unlock()
-	DPrintf("[sendAppendEntries] server: %+v, to: %d, args: %+v, reply: %+v, ok: %v", struct{term, me int}{rf.currentTerm,rf.me}, server, *args, *reply, ok)
+	if !ok {
+	    return ok
+    }
     if rf.currentTerm < reply.Term {
         rf.currentTerm = reply.Term
         if rf.state != follower {
@@ -426,7 +445,7 @@ func (rf *Raft) elect() {
                     if atomic.LoadInt32(&rf.done) == 1 {
                         return
                     }
-                    if rf.state != follower {
+                    if rf.state != follower && rf.state != candidate {
                         break loop
                     }
                     go func(r int) {
@@ -441,6 +460,7 @@ func (rf *Raft) elect() {
 func (rf *Raft) doElection(round int) {
     rf.mu.Lock()
     rf.state = candidate
+    rf.electionCount++
     rf.currentTerm++
     term := rf.currentTerm
     rf.electionTimer.Reset(getElectionTimeout())
@@ -455,7 +475,7 @@ func (rf *Raft) doElection(round int) {
     rf.mu.Unlock()
 
     var wg sync.WaitGroup
-    grant := make(chan bool)
+    grant := make(chan int) // -1:timeout 0:not granted 1:granted
     done := make(chan bool)
     for i := 0; i < len(rf.peers); i++ {
         if i == rf.me {
@@ -472,9 +492,15 @@ func (rf *Raft) doElection(round int) {
             args.Round = round
             reply := new(RequestVoteReply)
             ok := rf.sendRequestVote(server, args, reply)
-            if ok && reply.VoteGranted {
-                grant <- true
+            re := -1
+            if ok {
+                if reply.VoteGranted {
+                    re = 1
+                } else {
+                    re = 0
+                }
             }
+            grant <- re
         }(i)
     }
     go func() {
@@ -483,7 +509,9 @@ func (rf *Raft) doElection(round int) {
     }()
 
     msg := fmt.Sprintf("[doElection] server: %d, term: %d", rf.me, term)
-    granted := 0
+    numGranted := 1    // including self
+    numNotGranted := 0
+    numTimeout := 0
 loop:
     for {
         select {
@@ -491,12 +519,21 @@ loop:
             msg += fmt.Sprintf(", cancel election because of becoming follower")
             DPrintf(msg)
             rf.mu.Lock()
-            rf.state = follower
+            rf.electionCount--
+            if rf.electionCount == 0 {
+                rf.state = follower
+            }
             rf.mu.Unlock()
             return
-        case <-grant:
-            granted ++
-            if granted >= len(rf.peers)/2 {
+        case re := <-grant:
+            if re == -1 {
+                numTimeout++
+            } else if re == 0 {
+                numNotGranted++
+            } else if re == 1 {
+                numGranted++
+            }
+            if numGranted > len(rf.peers)/2 {
                 break loop
             }
         case <-done:
@@ -506,14 +543,17 @@ loop:
 
     rf.mu.Lock()
     result := false
-    if rf.currentTerm == term && granted >= len(rf.peers)/2 {
+    rf.electionCount--
+    if rf.currentTerm == term && numGranted > len(rf.peers)/2 {
         rf.state = leader
         rf.beLeader <- true
         result = true
     } else {
-        rf.state = follower
+        if rf.electionCount == 0 {
+            rf.state = follower
+        }
     }
-    msg += fmt.Sprintf(", result: %v, granted: %d, current_term: %d", result, granted, rf.currentTerm)
+    msg += fmt.Sprintf(", result: %v, granted: %d, not granted: %d, timeout: %d, current_term: %d", result, numGranted, numNotGranted, numTimeout, rf.currentTerm)
     DPrintf(msg)
     rf.mu.Unlock()
 }
