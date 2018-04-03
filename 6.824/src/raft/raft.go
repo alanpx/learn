@@ -61,15 +61,15 @@ type Raft struct {
 	state serverState
 	currentTerm int
 	votedFor int       // default -1
-	log []Log          // starting at index 0
+	log []Log          // starting at index 1
 
 	// volatile state on all servers
-	commitIndex int    // default -1
-	lastApplied int    // default -1
+	commitIndex int
+	lastApplied int
 
 	// volatile state on leaders
 	nextIndex []int    // default len(log)
-	matchIndex []int   // default -1
+	matchIndex []int
 
 	electionTimer *time.Timer
 	beLeader      chan bool
@@ -182,7 +182,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
         return
     }
     if args.Term > rf.currentTerm || rf.votedFor == args.CandidateId {
-        if len(rf.log) == 0 || args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1) {
+        if len(rf.log) == 1 || args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1) {
             reply.VoteGranted = true
             rf.votedFor = args.CandidateId
             rf.electionTimer.Reset(getElectionTimeout())
@@ -232,11 +232,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-    //msg := fmt.Sprintf("[sendRequestVote] server: %+v, to: %d, args: %+v", struct{term, me int}{rf.currentTerm,rf.me}, server, *args)
-    //DPrintf(msg)
+    msg := fmt.Sprintf("[sendRequestVote] time: %s, server: %+v, to: %d, args: %+v", time.Now().Format("15:04:05.00"), struct{term, me int}{rf.currentTerm,rf.me}, server, *args)
     ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-    //msg += fmt.Sprintf(", reply: %+v, ok: %v", *reply, ok)
-    //DPrintf(msg)
+    msg += fmt.Sprintf(", reply: %+v, ok: %v", *reply, ok)
+    DPrintf(msg)
     if !ok {
         return ok
     }
@@ -277,8 +276,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     reply.Term = rf.currentTerm
     reply.Success = false
     msg := fmt.Sprintf("[AppendEntries] server: %+v, args: %+v", struct{term, me int}{rf.currentTerm,rf.me}, *args)
-    //DPrintf(msg)
     if args.Term < rf.currentTerm {
+        DPrintf(msg)
         return
     }
 
@@ -294,21 +293,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
             }
         }
     }
-    if len(args.Entries) == 0 {
-        reply.Success = true
-        return
-    }
-    if args.PrevLogIndex < 0 {
-        rf.log = args.Entries
-        reply.Success = true
-    } else if args.PrevLogIndex < len(rf.log) {
-        if rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
+
+    if len(args.Entries) > 0 {
+        if args.PrevLogIndex <= 0 {
+            rf.log = make([]Log, 1)
+            rf.log = append(rf.log, args.Entries...)
             reply.Success = true
-            rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-        } else {
-            rf.log = rf.log[:args.PrevLogIndex]
+        } else if args.PrevLogIndex < len(rf.log) {
+            if rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
+                reply.Success = true
+                rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+            } else {
+                rf.log = rf.log[:args.PrevLogIndex]
+            }
         }
+    } else {
+        reply.Success = true
     }
+    oldCommitIndex := rf.commitIndex
     if args.LeaderCommit > rf.commitIndex {
         if args.LeaderCommit > len(rf.log) - 1 {
             rf.commitIndex = len(rf.log) - 1
@@ -317,21 +319,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         }
         rf.newCommit <- true
     }
-    tmpLog := make([]int, len(rf.log))
-    for i, l := range rf.log {
-        tmpLog[i] = l.Term
-    }
-    msg += fmt.Sprintf(", reply: %+v, log: %+v, commitIndex: %d", *reply, tmpLog, rf.commitIndex)
+    msg += fmt.Sprintf(", reply: %+v, log: %+v, commitIndex: %d->%d, lastApplied: %d", *reply, rf.log, oldCommitIndex, rf.commitIndex, rf.lastApplied)
     DPrintf(msg)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-    msg := fmt.Sprintf("[sendAppendEntries] server: %+v, to: %d, args: %+v", struct{term, me int}{rf.currentTerm,rf.me}, server, *args)
-    //DPrintf(msg)
+    msg := fmt.Sprintf("[sendAppendEntries] time: %s, server: %+v, to: %d, args: %+v", time.Now().Format("15:04:05.00"), struct{term, me int}{rf.currentTerm,rf.me}, server, *args)
     ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
     msg += fmt.Sprintf(", reply: %+v, ok: %v", *reply, ok)
-    //DPrintf(msg)
 	if !ok {
+        //DPrintf(msg)
 	    return ok
     }
 
@@ -367,14 +364,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
         } else {
             rf.nextIndex[server]--
         }
-        tmpLog := make([]int, len(rf.log))
-        for i, l := range rf.log {
-            tmpLog[i] = l.Term
-        }
-        msg += fmt.Sprintf(", log: %+v, commitIndex: %d, matchIndex: %+v, nextIndex: %+v", tmpLog, rf.commitIndex, rf.matchIndex, rf.nextIndex)
-        DPrintf(msg)
+        msg += fmt.Sprintf(", log: %+v, commitIndex: %d, matchIndex: %+v, nextIndex: %+v", rf.log, rf.commitIndex, rf.matchIndex, rf.nextIndex)
     }
-	return ok
+    DPrintf(msg)
+    return ok
 }
 
 //
@@ -403,11 +396,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
         index = len(rf.log)
         term = rf.currentTerm
         rf.log = append(rf.log, Log{ Term:rf.currentTerm, Command:command })
-        tmpLog := make([]int, len(rf.log))
-        for i, l := range rf.log {
-            tmpLog[i] = l.Term
-        }
-        DPrintf("[Start] server: %+v, command: %+v, index: %d, term: %d, isLeader: %v, log: %+v", struct{term, me int}{rf.currentTerm,rf.me}, command, index, term, isLeader, tmpLog)
+        DPrintf("[Start] server: %+v, command: %d, index: %d, term: %d, isLeader: %v, log: %+v", struct{term, me int}{rf.currentTerm,rf.me}, command.(int), index, term, isLeader, rf.log)
     }
     return index, term, isLeader
 }
@@ -444,13 +433,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.state = follower
 	rf.votedFor = -1
-	rf.commitIndex = -1
-	rf.lastApplied = -1
+	rf.log = make([]Log, 1)
 	rf.nextIndex = make([]int, len(rf.peers))
     rf.matchIndex = make([]int, len(rf.peers))
     for i := 0; i < len(rf.peers); i++ {
         rf.nextIndex[i] = len(rf.log)
-        rf.matchIndex[i] = -1
     }
 
 	// initialize from state persisted before a crash
@@ -498,9 +485,6 @@ func (rf *Raft) heartBeat() {
                 args := AppendEntriesArgs{
                     Term: rf.currentTerm,
                     LeaderId: rf.me,
-                    PrevLogIndex: -1,
-                    PrevLogTerm: -1,
-                    Entries: []Log{},
                     LeaderCommit: rf.commitIndex,
                     Round: round,
                 }
@@ -517,7 +501,7 @@ func (rf *Raft) heartBeat() {
                         if nextIndex[server] < len(log) {
                             a.Entries = log[nextIndex[server]:]
                             a.PrevLogIndex = nextIndex[server] - 1
-                            if a.PrevLogIndex >= 0 {
+                            if a.PrevLogIndex > 0 {
                                 a.PrevLogTerm = log[a.PrevLogIndex].Term
                             }
                         }
@@ -569,12 +553,8 @@ func (rf *Raft) doElection(round int) {
     rf.electionTimer.Reset(getElectionTimeout())
     rf.votedFor = rf.me
     me := rf.me
-    lastLogIndex := -1
-    lastLogTerm := -1
-    if len(rf.log) > 0 {
-        lastLogIndex = len(rf.log) - 1
-        lastLogTerm = rf.log[len(rf.log)-1].Term
-    }
+    lastLogIndex := len(rf.log) - 1
+    lastLogTerm := rf.log[len(rf.log)-1].Term
     rf.mu.Unlock()
 
     var wg sync.WaitGroup
@@ -676,6 +656,7 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
                 lastApplied++
                 msg.Index = lastApplied
                 applyCh <- msg
+                DPrintf("[apply] server: %d, index: %d", rf.me, msg.Index)
             }
         }
     }
