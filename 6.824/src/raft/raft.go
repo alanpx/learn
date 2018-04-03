@@ -276,7 +276,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     defer rf.mu.Unlock()
     reply.Term = rf.currentTerm
     reply.Success = false
-    msg := fmt.Sprintf("[AppendEntries] server: %+v, args: %+v, reply: %+v", struct{term, me int}{rf.currentTerm,rf.me}, *args, *reply)
+    msg := fmt.Sprintf("[AppendEntries] server: %+v, args: %+v", struct{term, me int}{rf.currentTerm,rf.me}, *args)
     //DPrintf(msg)
     if args.Term < rf.currentTerm {
         return
@@ -317,7 +317,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         }
         rf.newCommit <- true
     }
-    msg += fmt.Sprintf(", commitIndex: %d", rf.commitIndex)
+    tmpLog := make([]int, len(rf.log))
+    for i, l := range rf.log {
+        tmpLog[i] = l.Term
+    }
+    msg += fmt.Sprintf(", reply: %+v, log: %+v, commitIndex: %d", *reply, tmpLog, rf.commitIndex)
     DPrintf(msg)
 }
 
@@ -363,7 +367,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
         } else {
             rf.nextIndex[server]--
         }
-        msg += fmt.Sprintf(", commitIndex: %d, matchIndex: %+v, nextIndex: %+v", rf.commitIndex, rf.matchIndex, rf.nextIndex)
+        tmpLog := make([]int, len(rf.log))
+        for i, l := range rf.log {
+            tmpLog[i] = l.Term
+        }
+        msg += fmt.Sprintf(", log: %+v, commitIndex: %d, matchIndex: %+v, nextIndex: %+v", tmpLog, rf.commitIndex, rf.matchIndex, rf.nextIndex)
         DPrintf(msg)
     }
 	return ok
@@ -395,7 +403,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
         index = len(rf.log)
         term = rf.currentTerm
         rf.log = append(rf.log, Log{ Term:rf.currentTerm, Command:command })
-        DPrintf("[Start] server: %+v, command: %+v, index: %d, term: %d, isLeader: %v, logLen: %d", struct{term, me int}{rf.currentTerm,rf.me}, command, index, term, isLeader, len(rf.log))
+        tmpLog := make([]int, len(rf.log))
+        for i, l := range rf.log {
+            tmpLog[i] = l.Term
+        }
+        DPrintf("[Start] server: %+v, command: %+v, index: %d, term: %d, isLeader: %v, log: %+v", struct{term, me int}{rf.currentTerm,rf.me}, command, index, term, isLeader, tmpLog)
     }
     return index, term, isLeader
 }
