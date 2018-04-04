@@ -649,14 +649,13 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
             lastApplied := rf.lastApplied
             commitIndex := rf.commitIndex
             rf.lastApplied = rf.commitIndex
-            msg := ApplyMsg{Command: rf.log[rf.lastApplied].Command}
             rf.mu.Unlock()
 
             for lastApplied < commitIndex {
                 lastApplied++
-                msg.Index = lastApplied
+                msg := ApplyMsg{ Index: lastApplied, Command: rf.log[lastApplied].Command }
                 applyCh <- msg
-                DPrintf("[apply] server: %d, index: %d", rf.me, msg.Index)
+                DPrintf("[apply] server: %d, msg: %+v", rf.me, msg)
             }
         }
     }
