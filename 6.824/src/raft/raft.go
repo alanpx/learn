@@ -89,9 +89,9 @@ const (
 	follower serverState = 0
 	leader               = 1
 	candidate            = 2
-	heartBeatInterval    = 900 * time.Millisecond
-	electionTimeout      = 1000 * time.Millisecond
-	maxRandTime          = 500   // ms
+	heartBeatInterval    = 400 * time.Millisecond
+	electionTimeout      = 500 * time.Millisecond
+	maxRandTime          = 200   // ms
 )
 
 // return currentTerm and whether this server
@@ -272,6 +272,10 @@ type AppendEntriesArgs struct {
 	Round int  // for debug
 }
 
+func (arg AppendEntriesArgs)String() string{
+    return fmt.Sprintf("Term: %d, LeaderId: %d, PrevLogIndex: %d, PrevLogTerm: %d, EntriesLen: %d, LeaderCommit: %d, Round: %d", arg.Term, arg.LeaderId, arg.PrevLogIndex, arg.PrevLogTerm, len(arg.Entries), arg.LeaderCommit, arg.Round)
+}
+
 type AppendEntriesReply struct {
 	Term int
 	Success bool
@@ -284,7 +288,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     reply.Success = false
     msg := fmt.Sprintf("[AppendEntries] server: %+v, args: %+v", struct{term, me int}{rf.currentTerm,rf.me}, *args)
     if args.Term < rf.currentTerm {
-        DPrintf(msg)
+        //DPrintf(msg)
         return
     }
 
@@ -334,13 +338,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         rf.persist()
     }
     msg += fmt.Sprintf(", reply: %+v, log: %+v, commitIndex: %d->%d, lastApplied: %d", *reply, rf.log, oldCommitIndex, rf.commitIndex, rf.lastApplied)
-    DPrintf(msg)
+    //DPrintf(msg)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
     msg := fmt.Sprintf("[sendAppendEntries] time: %s, server: %+v, to: %d, args: %+v", time.Now().Format("15:04:05.00"), struct{term, me int}{rf.currentTerm,rf.me}, server, *args)
     ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
     msg += fmt.Sprintf(", reply: %+v, ok: %v", *reply, ok)
+    DPrintf(msg)
 	if !ok {
         //DPrintf(msg)
 	    return ok
@@ -361,6 +366,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
             }
         }
     }
+    if args.Term < reply.Term {
+        return ok
+    }
+
     if len(args.Entries) > 0 {
         rf.matchIndex[rf.me] = len(rf.log) - 1
         rf.nextIndex[rf.me] = len(rf.log)
@@ -380,7 +389,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
         } else {
             rf.nextIndex[server]--
         }
-        msg += fmt.Sprintf(", log: %+v, commitIndex: %d, matchIndex: %+v, nextIndex: %+v", rf.log, rf.commitIndex, rf.matchIndex, rf.nextIndex)
+        msg += fmt.Sprintf(", logLen: %d, commitIndex: %d, matchIndex: %+v, nextIndex: %+v", len(rf.log), rf.commitIndex, rf.matchIndex, rf.nextIndex)
+        //DPrintf(msg)
     }
     DPrintf(msg)
     return ok
@@ -413,7 +423,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
         term = rf.currentTerm
         rf.log = append(rf.log, Log{ Term:rf.currentTerm, Command:command })
         rf.persist()
-        DPrintf("[Start] server: %+v, command: %d, index: %d, term: %d, isLeader: %v, log: %+v", struct{term, me int}{rf.currentTerm,rf.me}, command.(int), index, term, isLeader, rf.log)
+        DPrintf("[Start] server: %+v, command: %d, index: %d", struct{term, me int}{rf.currentTerm,rf.me}, command.(int), index)
     }
     return index, term, isLeader
 }
@@ -451,7 +461,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = follower
 	rf.votedFor = -1
 	rf.log = make([]Log, 1)
-	rf.nextIndex = make([]int, len(rf.peers))
+    rf.nextIndex = make([]int, len(rf.peers))
     rf.matchIndex = make([]int, len(rf.peers))
     for i := 0; i < len(rf.peers); i++ {
         rf.nextIndex[i] = len(rf.log)
@@ -536,7 +546,7 @@ func (rf *Raft) elect() {
     for {
         select {
         case <-rf.beFollower:
-                rf.electionTimer.Reset(getElectionTimeout())
+            rf.electionTimer.Reset(getElectionTimeout())
             round := 0
         loop:
             for {
@@ -546,7 +556,7 @@ func (rf *Raft) elect() {
                     if atomic.LoadInt32(&rf.done) == 1 {
                         return
                     }
-                    if rf.state != follower && rf.state != candidate {
+                    if rf.state == leader {
                         break loop
                     }
                     go func(r int) {
@@ -606,7 +616,7 @@ func (rf *Raft) doElection(round int) {
         done <- true
     }()
 
-    msg := fmt.Sprintf("[doElection] server: %d, term: %d", rf.me, term)
+    msg := fmt.Sprintf("[doElection] server: %d, term: %d, round: %d", rf.me, term, round)
     numGranted := 1    // including self
     numNotGranted := 0
     numTimeout := 0
@@ -640,20 +650,21 @@ loop:
     }
 
     rf.mu.Lock()
+    defer rf.mu.Unlock()
     result := false
     rf.electionCount--
-    if rf.currentTerm == term && numGranted > len(rf.peers)/2 {
+    if rf.currentTerm > term {
+        return
+    }
+    if numGranted > len(rf.peers)/2 {
         rf.state = leader
         rf.beLeader <- true
         result = true
     } else {
-        if rf.electionCount == 0 {
-            rf.state = follower
-        }
+        rf.state = follower
     }
-    msg += fmt.Sprintf(", result: %v, granted: %d, not granted: %d, timeout: %d, current_term: %d", result, numGranted, numNotGranted, numTimeout, rf.currentTerm)
+    msg += fmt.Sprintf(", result: %v, granted: %d, not granted: %d, timeout: %d, current_term: %d, electionCount: %d", result, numGranted, numNotGranted, numTimeout, rf.currentTerm, rf.electionCount)
     DPrintf(msg)
-    rf.mu.Unlock()
 }
 
 func (rf *Raft) apply(applyCh chan ApplyMsg) {
