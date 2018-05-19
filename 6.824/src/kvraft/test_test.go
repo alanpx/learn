@@ -18,6 +18,7 @@ func check(t *testing.T, ck *Clerk, key string, value string) {
 	if v != value {
 		t.Fatalf("Get(%v): expected:\n%v\nreceived:\n%v", key, value, v)
 	}
+	DPrintf("[check] key: %s, value: %s", key, value)
 }
 
 // a client runs the function f and then signals it is done
@@ -169,7 +170,6 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 				}
 			}
 		})
-
 		if partitions {
 			// Allow the clients to perform some operations without interruption
 			time.Sleep(1 * time.Second)
