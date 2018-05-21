@@ -31,6 +31,18 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func (c *Config) copy() *Config {
+	cf := Config{}
+	cf.Num = c.Num
+	cf.Shards = c.Shards
+	cf.Groups = make(map[int][]string)
+	for i, g := range c.Groups {
+		cf.Groups[i] = make([]string, len(g))
+		copy(cf.Groups[i], g)
+	}
+	return &cf
+}
+
 const (
 	OK = "OK"
 )
@@ -38,6 +50,7 @@ const (
 type Err string
 
 type JoinArgs struct {
+	Id int64
 	Servers map[int][]string // new GID -> servers mappings
 }
 
@@ -47,6 +60,7 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
+	Id int64
 	GIDs []int
 }
 
@@ -56,6 +70,7 @@ type LeaveReply struct {
 }
 
 type MoveArgs struct {
+	Id int64
 	Shard int
 	GID   int
 }
@@ -66,6 +81,7 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
+	Id int64
 	Num int // desired config number
 }
 

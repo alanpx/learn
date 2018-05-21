@@ -276,7 +276,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
     msg := fmt.Sprintf("[sendRequestVote] time: %s, server: %+v, to: %d, args: %+v", time.Now().Format("15:04:05.00"), struct{term, me int}{rf.currentTerm,rf.me}, server, *args)
     ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
     msg += fmt.Sprintf(", reply: %+v, ok: %v", *reply, ok)
-    DPrintf(msg)
+    //DPrintf(msg)
     if !ok {
         return ok
     }
@@ -381,7 +381,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
     msg := fmt.Sprintf("[sendAppendEntries] time: %s, server: %+v, to: %d, args: %+v", time.Now().Format("15:04:05.00"), struct{term, me int}{rf.currentTerm,rf.me}, server, *args)
     ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
     msg += fmt.Sprintf(", reply: %+v, ok: %v", *reply, ok)
-    DPrintf(msg)
+    //DPrintf(msg)
 	if !ok {
         //DPrintf(msg)
 	    return ok
@@ -426,9 +426,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
             rf.nextIndex[server]--
         }
         msg += fmt.Sprintf(", logLen: %d, commitIndex: %d, matchIndex: %+v, nextIndex: %+v", len(rf.log), rf.commitIndex, rf.matchIndex, rf.nextIndex)
-        //DPrintf(msg)
+        DPrintf(msg)
     }
-    DPrintf(msg)
+    //DPrintf(msg)
     return ok
 }
 

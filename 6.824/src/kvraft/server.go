@@ -10,7 +10,7 @@ import (
 	"bytes"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -40,8 +40,8 @@ type RaftKV struct {
 
 	// Your definitions here.
 	kvStore           map[string]string
-	applyMap          map[int64]chan Op // apply channel for each request
-	doneMap           map[int64]bool    // processed request, to prevent repeating
+	applyMap          map[int64][]chan string // apply channel for each request
+	doneMap           map[int64]bool          // processed request, to prevent repeating
 	lastIncludedIndex int
 	lastIncludedTerm  int
 }
@@ -50,63 +50,45 @@ type RaftKV struct {
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	op := Op{args.Id, "Get", args.Key, ""}
-	msg := fmt.Sprintf("[Get] me: %d, op: %+v", kv.me, op)
-	_, _, isLeader := kv.rf.Start(op)
-	if !isLeader {
-		reply.WrongLeader = true
-		reply.Err = "not leader"
-		msg += fmt.Sprintf(", reply: %+v", *reply)
-		//DPrintf(msg)
-		return
-	}
-
-	kv.mu.Lock()
-	ch, exist := kv.applyMap[op.Id]
-	if !exist {
-		ch = make(chan Op)
-		kv.applyMap[op.Id] = ch
-	}
-	kv.mu.Unlock()
-	select {
-	case <-ch:
-		kv.mu.Lock()
-		reply.Value = kv.kvStore[op.Key]
-		delete(kv.applyMap, op.Id)
-		kv.mu.Unlock()
-		msg += fmt.Sprintf(", reply: %+v", *reply)
-		//DPrintf(msg)
-		return
-	}
+	reply.WrongLeader, reply.Err, reply.Value = kv.operate(op)
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	op := Op{args.Id, args.Op, args.Key, args.Value}
+	op := Op{args.Id, args.Type, args.Key, args.Value}
+	reply.WrongLeader, reply.Err, _ = kv.operate(op)
+	return
+}
+
+func (kv *RaftKV) operate(op Op) (bool, Err, string) {
 	_, _, isLeader := kv.rf.Start(op)
-	msg := fmt.Sprintf("[PutAppend] me: %d, op: %+v", kv.me, op)
+	msg := fmt.Sprintf("[operate] me: %d, op: %+v", kv.me, op)
 	if !isLeader {
-		reply.WrongLeader = true
-		reply.Err = "not leader"
-		msg += fmt.Sprintf(", reply: %+v", *reply)
-		//DPrintf(msg)
-		return
+		return true, "not leader", ""
 	}
 
 	kv.mu.Lock()
-	ch, exist := kv.applyMap[op.Id]
+	ch := make(chan string)
+	i := 0
+	_, exist := kv.applyMap[op.Id]
 	if !exist {
-		ch = make(chan Op)
-		kv.applyMap[op.Id] = ch
+		kv.applyMap[op.Id] = []chan string{ch}
+	} else {
+		i = len(kv.applyMap[op.Id])
+		kv.applyMap[op.Id] = append(kv.applyMap[op.Id], ch)
 	}
 	kv.mu.Unlock()
+
 	select {
-	case <-ch:
+	case str := <-ch:
 		kv.mu.Lock()
-		delete(kv.applyMap, op.Id)
+		kv.applyMap[op.Id] = append(kv.applyMap[op.Id][:i], kv.applyMap[op.Id][i+1:]...)
+		if len(kv.applyMap[op.Id]) == 0 {
+			delete(kv.applyMap, op.Id)
+		}
 		kv.mu.Unlock()
-		msg += fmt.Sprintf(", reply: %+v", *reply)
 		DPrintf(msg)
-		return
+		return false, "", str
 	}
 }
 
@@ -145,7 +127,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.kvStore = make(map[string]string)
-	kv.applyMap = make(map[int64]chan Op)
+	kv.applyMap = make(map[int64][]chan string)
 	kv.doneMap = make(map[int64]bool)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
@@ -162,6 +144,8 @@ func (kv *RaftKV) apply() {
 		case msg := <-kv.applyCh:
 			DPrintf("[apply] me: %d, msg: %+v", kv.me, msg)
 			kv.mu.Lock()
+			var ch []chan string
+			var val string
 			if msg.UseSnapshot {
 				r := bytes.NewBuffer(msg.Snapshot)
 				d := gob.NewDecoder(r)
@@ -176,20 +160,22 @@ func (kv *RaftKV) apply() {
 						kv.kvStore[op.Key] = op.Val
 					} else if op.Type == "Append" {
 						kv.kvStore[op.Key] += op.Val
+					} else if op.Type == "Get" {
+						val = kv.kvStore[op.Key]
 					}
 				}
 				kv.doneMap[op.Id] = true
-				ch, exist := kv.applyMap[op.Id]
-				// a request may be sent multi times, when it is done, should broadcast by close instead of send
-				if exist {
-					close(ch)
-				}
+				ch = kv.applyMap[op.Id]
 				kv.lastIncludedIndex = msg.Index
 				kv.lastIncludedTerm = msg.Term
 			}
 			kv.mu.Unlock()
 
-			if msg.RaftStateSize >= kv.maxraftstate {
+			for _, c := range ch {
+				c <- val
+			}
+
+			if kv.maxraftstate > 0 && msg.RaftStateSize >= kv.maxraftstate {
 				go kv.snapshot()
 			}
 		}

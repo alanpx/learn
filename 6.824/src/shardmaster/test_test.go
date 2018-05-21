@@ -9,6 +9,7 @@ import (
 import "fmt"
 
 func check(t *testing.T, groups []int, ck *Clerk) {
+	DPrintf("[check] groups: %+v", groups)
 	c := ck.Query(-1)
 	if len(c.Groups) != len(groups) {
 		t.Fatalf("wanted %v groups, got %v", len(groups), len(c.Groups))
@@ -48,11 +49,12 @@ func check(t *testing.T, groups []int, ck *Clerk) {
 		}
 	}
 	if max > min+1 {
-		t.Fatalf("max %v too much larger than min %v", max, min)
+		t.Fatalf("max %v too much larger than min %v, c: %+v", max, min, c)
 	}
 }
 
 func check_same_config(t *testing.T, c1 Config, c2 Config) {
+	DPrintf("[check_same_config] c1: %+v, c2: %+v", c1, c2)
 	if c1.Num != c2.Num {
 		t.Fatalf("Num wrong")
 	}
@@ -123,6 +125,7 @@ func TestBasic(t *testing.T) {
 	check(t, []int{gid2}, ck)
 	cfa[5] = ck.Query(-1)
 
+	//fmt.Printf("cfa: %+v\n", cfa)
 	fmt.Printf("  ... Passed\n")
 
 	fmt.Printf("Test: Historical queries ...\n")
