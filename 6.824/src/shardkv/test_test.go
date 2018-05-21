@@ -12,6 +12,7 @@ func check(t *testing.T, ck *Clerk, key string, value string) {
 	if v != value {
 		t.Fatalf("Get(%v): expected:\n%v\nreceived:\n%v", key, value, v)
 	}
+	DPrintf("[check] key: %s, value: %s", key, value)
 }
 
 //

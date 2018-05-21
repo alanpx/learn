@@ -71,7 +71,6 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	if reply.WrongLeader {
 		return
 	}
-	DPrintf("[Query] me: %d, args: %+v, reply: %+v", sm.me, *args, *reply)
 }
 
 func (sm *ShardMaster) operate(op Op) (bool, Err, Config) {
@@ -103,9 +102,8 @@ func (sm *ShardMaster) operate(op Op) (bool, Err, Config) {
 			delete(sm.applyMap, op.Id)
 		}
 		sm.mu.Unlock()
-		if op.Type != "Query" {
-			DPrintf(msg)
-		}
+		msg += fmt.Sprintf(", config: %+v", c)
+		DPrintf(msg)
 		return false, "", c
 	}
 }
@@ -141,7 +139,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	gob.Register(Op{})
 	sm.applyCh = make(chan raft.ApplyMsg)
-	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
+	sm.rf = raft.Make(servers, me, persister, sm.applyCh, "shardmaster")
 
 	// Your code here.
 	sm.applyMap = make(map[int64][]chan Config)

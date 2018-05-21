@@ -10,7 +10,7 @@ import (
 	"bytes"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -57,7 +57,6 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	op := Op{args.Id, args.Type, args.Key, args.Value}
 	reply.WrongLeader, reply.Err, _ = kv.operate(op)
-	return
 }
 
 func (kv *RaftKV) operate(op Op) (bool, Err, string) {
@@ -131,7 +130,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.doneMap = make(map[int64]bool)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh, "raftkv")
 
 	// You may need initialization code here.
 	go kv.apply()

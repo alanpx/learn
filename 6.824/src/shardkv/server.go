@@ -6,13 +6,29 @@ import "6.824/labrpc"
 import "6.824/raft"
 import "sync"
 import "encoding/gob"
+import (
+	"log"
+	"bytes"
+	"fmt"
+)
 
+const Debug = 1
 
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Id int64    // request id
+	Type string // Get Put Append
+	Key string
+	Val string
 }
 
 type ShardKV struct {
@@ -26,15 +42,58 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	kvStore           map[string]string
+	applyMap          map[int64][]chan string // apply channel for each request
+	doneMap           map[int64]bool          // processed request, to prevent repeating
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	op := Op{args.Id, "Get", args.Key, ""}
+	reply.WrongLeader, reply.Err, reply.Value = kv.operate(op)
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	op := Op{args.Id, args.Op, args.Key, args.Value}
+	reply.WrongLeader, reply.Err, _ = kv.operate(op)
+}
+
+func (kv *ShardKV) operate(op Op) (bool, Err, string) {
+	_, _, isLeader := kv.rf.Start(op)
+	msg := fmt.Sprintf("[operate] me: %d, op: %+v", kv.me, op)
+	//DPrintf(msg)
+	if !isLeader {
+		return true, "not leader", ""
+	}
+
+	kv.mu.Lock()
+	ch := make(chan string)
+	i := 0
+	_, exist := kv.applyMap[op.Id]
+	if !exist {
+		kv.applyMap[op.Id] = []chan string{ch}
+	} else {
+		i = len(kv.applyMap[op.Id])
+		kv.applyMap[op.Id] = append(kv.applyMap[op.Id], ch)
+	}
+	kv.mu.Unlock()
+
+	select {
+	case value := <-ch:
+		kv.mu.Lock()
+		kv.applyMap[op.Id] = append(kv.applyMap[op.Id][:i], kv.applyMap[op.Id][i+1:]...)
+		if len(kv.applyMap[op.Id]) == 0 {
+			delete(kv.applyMap, op.Id)
+		}
+		kv.mu.Unlock()
+		msg += fmt.Sprintf(", value: %s", value)
+		DPrintf(msg)
+		return false, OK, value
+	}
 }
 
 //
@@ -90,13 +149,75 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.masters = masters
 
 	// Your initialization code here.
+	kv.kvStore = make(map[string]string)
+	kv.applyMap = make(map[int64][]chan string)
+	kv.doneMap = make(map[int64]bool)
 
 	// Use something like this to talk to the shardmaster:
 	// kv.mck = shardmaster.MakeClerk(kv.masters)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh, fmt.Sprintf("shardkv-%d", gid))
 
 	return kv
+}
+
+func (kv *ShardKV) apply() {
+	for {
+		select {
+		case msg := <-kv.applyCh:
+			DPrintf("[apply] me: %d, msg: %+v", kv.me, msg)
+			kv.mu.Lock()
+			var ch []chan string
+			var val string
+			if msg.UseSnapshot {
+				r := bytes.NewBuffer(msg.Snapshot)
+				d := gob.NewDecoder(r)
+				d.Decode(&kv.lastIncludedIndex)
+				d.Decode(&kv.lastIncludedTerm)
+				d.Decode(&kv.kvStore)
+				d.Decode(&kv.doneMap)
+			} else {
+				op := msg.Command.(Op)
+				if !kv.doneMap[op.Id] {
+					if op.Type == "Put" {
+						kv.kvStore[op.Key] = op.Val
+					} else if op.Type == "Append" {
+						kv.kvStore[op.Key] += op.Val
+					} else if op.Type == "Get" {
+						val = kv.kvStore[op.Key]
+					}
+				}
+				kv.doneMap[op.Id] = true
+				ch = kv.applyMap[op.Id]
+				kv.lastIncludedIndex = msg.Index
+				kv.lastIncludedTerm = msg.Term
+			}
+			kv.mu.Unlock()
+
+			for _, c := range ch {
+				c <- val
+			}
+
+			if kv.maxraftstate > 0 && msg.RaftStateSize >= kv.maxraftstate {
+				go kv.snapshot()
+			}
+		}
+	}
+}
+
+func (kv *ShardKV) snapshot() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(kv.lastIncludedIndex)
+	e.Encode(kv.lastIncludedTerm)
+	e.Encode(kv.kvStore)
+	e.Encode(kv.doneMap)
+	data := w.Bytes()
+
+	kv.rf.Snapshot(data, kv.lastIncludedIndex, kv.lastIncludedTerm)
+	DPrintf("[snapshot] me: %d, lastIncludedIndex: %d, lastIncludedTerm: %d", kv.me, kv.lastIncludedIndex, kv.lastIncludedTerm)
 }

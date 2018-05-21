@@ -57,6 +57,7 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	name string
 	// persistent state on all servers
 	state serverState
 	currentTerm int
@@ -193,7 +194,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     reply.VoteGranted = false
     //msg := fmt.Sprintf("[RequestVote] server: %+v, args: %+v, reply: %+v", struct{term, me int}{rf.currentTerm,rf.me}, *args, *reply)
     if args.Term < rf.currentTerm {
-        //DPrintf(msg)
+        //rf.DPrintf(msg)
         return
     }
     if args.Term > rf.currentTerm || rf.votedFor == args.CandidateId {
@@ -240,7 +241,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
             }
         }
     }
-    //DPrintf(msg)
+    //rf.DPrintf(msg)
 }
 
 //
@@ -276,7 +277,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
     msg := fmt.Sprintf("[sendRequestVote] time: %s, server: %+v, to: %d, args: %+v", time.Now().Format("15:04:05.00"), struct{term, me int}{rf.currentTerm,rf.me}, server, *args)
     ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
     msg += fmt.Sprintf(", reply: %+v, ok: %v", *reply, ok)
-    //DPrintf(msg)
+    //rf.DPrintf(msg)
     if !ok {
         return ok
     }
@@ -324,7 +325,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     reply.Success = false
     msg := fmt.Sprintf("[AppendEntries] server: %+v, args: %+v", struct{term, me int}{rf.currentTerm,rf.me}, *args)
     if args.Term < rf.currentTerm {
-        //DPrintf(msg)
+        //rf.DPrintf(msg)
         return
     }
 
@@ -374,16 +375,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         rf.persist()
     }
     msg += fmt.Sprintf(", reply: %+v, log: %+v, commitIndex: %d->%d, lastApplied: %d", *reply, rf.log, oldCommitIndex, rf.commitIndex, rf.lastApplied)
-    //DPrintf(msg)
+    //rf.DPrintf(msg)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
     msg := fmt.Sprintf("[sendAppendEntries] time: %s, server: %+v, to: %d, args: %+v", time.Now().Format("15:04:05.00"), struct{term, me int}{rf.currentTerm,rf.me}, server, *args)
     ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
     msg += fmt.Sprintf(", reply: %+v, ok: %v", *reply, ok)
-    //DPrintf(msg)
+    //rf.DPrintf(msg)
 	if !ok {
-        //DPrintf(msg)
+        //rf.DPrintf(msg)
 	    return ok
     }
 
@@ -426,9 +427,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
             rf.nextIndex[server]--
         }
         msg += fmt.Sprintf(", logLen: %d, commitIndex: %d, matchIndex: %+v, nextIndex: %+v", len(rf.log), rf.commitIndex, rf.matchIndex, rf.nextIndex)
-        DPrintf(msg)
+        //rf.DPrintf(msg)
     }
-    //DPrintf(msg)
+    //rf.DPrintf(msg)
     return ok
 }
 
@@ -503,7 +504,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
         term = rf.currentTerm
         rf.log = append(rf.log, Log{ Term:rf.currentTerm, Command:command })
         rf.persist()
-        DPrintf("[Start] server: %+v, command: %+v, index: %d", struct{term, me int}{rf.currentTerm,rf.me}, command, index)
+        rf.DPrintf("[Start] server: %+v, command: %+v, index: %d", struct{term, me int}{rf.currentTerm,rf.me}, command, index)
     }
     return index, term, isLeader
 }
@@ -531,13 +532,14 @@ func (rf *Raft) Kill() {
 // for any long-running work.
 //
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	persister *Persister, applyCh chan ApplyMsg, name string) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.name = name
 	rf.state = follower
 	rf.votedFor = -1
 	rf.log = make([]Log, 1)
@@ -723,7 +725,7 @@ loop:
         select {
         case <-rf.electionDone:
             msg += fmt.Sprintf(", cancel election because of becoming follower")
-            DPrintf(msg)
+            rf.DPrintf(msg)
             rf.mu.Lock()
             rf.electionCount--
             if rf.electionCount == 0 {
@@ -762,7 +764,7 @@ loop:
         rf.state = follower
     }
     msg += fmt.Sprintf(", result: %v, granted: %d, not granted: %d, timeout: %d, current_term: %d, electionCount: %d", result, numGranted, numNotGranted, numTimeout, rf.currentTerm, rf.electionCount)
-    DPrintf(msg)
+    rf.DPrintf(msg)
 }
 
 func (rf *Raft) apply(applyCh chan ApplyMsg) {
@@ -798,10 +800,14 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
                     msg.RaftStateSize = rf.persister.RaftStateSize()
                 }
                 applyCh <- msg
-                DPrintf("[apply] server: %d, msg: %+v", me, msg)
+                rf.DPrintf("[apply] server: %d, msg: %+v", me, msg)
             }
         }
     }
+}
+
+func (rf *Raft) DPrintf(format string, a ...interface{}) {
+    DPrintf(fmt.Sprintf("[%s] %s", rf.name, format), a...)
 }
 
 func getElectionTimeout() time.Duration {

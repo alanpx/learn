@@ -56,6 +56,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.config = ck.sm.Query(-1)
 	return ck
 }
 
@@ -67,6 +68,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 //
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
+	args.Id = nrand()
 	args.Key = key
 
 	for {
@@ -100,6 +102,7 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args := PutAppendArgs{}
+	args.Id = nrand()
 	args.Key = key
 	args.Value = value
 	args.Op = op
@@ -113,6 +116,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
+				DPrintf("[PutAppend] server: %d, args: %+v, ok: %v, reply:%+v", si, args, ok, reply)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
 					return
 				}
