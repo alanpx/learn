@@ -62,12 +62,13 @@ type Raft struct {
 	state serverState
 	currentTerm int
 	votedFor int       // default -1
-	log []Log          // starting at index 1
+	log []Log          // actual log starting at index 1 in absence of snapshot, otherwise starting at index 0, which is the log index lastIncludedIndex+1
 
+	// snapshot
 	snapshot []byte
-	isSnapshotComplete bool
-    lastIncludedIndex int
-    lastIncludedTerm int
+	isSnapshotComplete bool  // snapshot may be transfer by multi times, each time partly
+    lastIncludedIndex int    // index of last log of snapshot
+    lastIncludedTerm int     // term of last log of snapshot
 
 	// volatile state on all servers
 	commitIndex int
@@ -97,9 +98,9 @@ const (
 	follower serverState = 0
 	leader               = 1
 	candidate            = 2
-	heartBeatInterval    = 400 * time.Millisecond
-	electionTimeout      = 500 * time.Millisecond
-	maxRandTime          = 200   // ms
+	heartBeatInterval    = 40 * time.Millisecond
+	electionTimeout      = 50 * time.Millisecond
+	maxRandTime          = 20   // ms
 )
 
 // return currentTerm and whether this server
@@ -181,6 +182,8 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 	Term int
 	VoteGranted bool
+	ConflictTerm int  // term of the conflicting entry
+	FirstIndex int    // first index of the term
 }
 
 //
@@ -197,15 +200,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
         //rf.DPrintf(msg)
         return
     }
+
     if args.Term > rf.currentTerm || rf.votedFor == args.CandidateId {
         var lastLogIndex, lastLogTerm int
         done := false
         if rf.lastIncludedIndex > 0 && !rf.isSnapshotComplete {
             // snapshot is not complete
-            reply.VoteGranted = false
             done = true
         } else if rf.lastIncludedIndex == 0 && len(rf.log) == 1 {
-            // there is no log
+            // there is no log either in snapshot or in rf.log
             reply.VoteGranted = true
             done = true
         } else if rf.lastIncludedIndex == 0 || len(rf.log) > 1 {
@@ -224,6 +227,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     if reply.VoteGranted {
         rf.electionTimer.Reset(getElectionTimeout())
     }
+
     if args.Term > rf.currentTerm {
         rf.currentTerm = args.Term
         if reply.VoteGranted {
@@ -454,6 +458,7 @@ func (rf *Raft) InstallSnapshot(args * InstallSnapshotArgs, reply *InstallSnapsh
     if args.Term < rf.currentTerm {
         return
     }
+
     rf.lastIncludedIndex = args.LastIncludedIndex
     rf.lastIncludedTerm = args.LastIncludedTerm
     if len(rf.snapshot) < len(args.Data) + args.Offset {
@@ -462,6 +467,7 @@ func (rf *Raft) InstallSnapshot(args * InstallSnapshotArgs, reply *InstallSnapsh
     } else {
         rf.snapshot = append(rf.snapshot[:args.Offset], append(args.Data, rf.snapshot[args.Offset+len(args.Data):]...)...)
     }
+    rf.log = make([]Log, 0)
     if args.Done {
         rf.isSnapshotComplete = true
         rf.commitIndex = rf.lastIncludedIndex
