@@ -31,6 +31,7 @@ type Op struct {
 	Type string // Get Put Append
 	Key string
 	Val string
+	Config shardmaster.Config
 }
 
 type ShardKV struct {
@@ -46,9 +47,9 @@ type ShardKV struct {
 	// Your definitions here.
 	sm       *shardmaster.Clerk
 	config   shardmaster.Config
-	kvStore           map[string]string
-	applyMap          map[int64][]chan string // apply channel for each request
-	doneMap           map[int64]bool          // processed request, to prevent repeating
+	kvStore           map[int]map[string]string  // map[shard]map[key]value
+	applyMap          map[int64][]chan string    // apply channel for each request
+	doneMap           map[int64]bool             // processed request, to prevent repeating
 	lastIncludedIndex int
 	lastIncludedTerm  int
 }
@@ -104,6 +105,27 @@ func (kv *ShardKV) operate(op Op) (bool, Err, string) {
 	}
 }
 
+func (kv *ShardKV) fetchConfig() {
+    for {
+        config := kv.sm.Query(-1)
+        shards := []int{}
+        for i, g := range config.Shards {
+            g1 := kv.config.Shards[i]
+            if g == kv.gid && g1 != kv.gid {
+                shards = append(shards, i)
+            }
+        }
+        arg := FetchShardsArgs{Gid:}
+        go kv.sendFetchShards(shards)
+        kv.config = config
+        time.Sleep(fetchConfigInterval)
+    }
+}
+
+func (kv *ShardKV) sendFetchShards(shards []int) {
+
+}
+
 //
 // the tester calls Kill() when a ShardKV instance won't
 // be needed again. you are not required to do anything
@@ -157,7 +179,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.masters = masters
 
 	// Your initialization code here.
-	kv.kvStore = make(map[string]string)
+	kv.kvStore = make(map[int]map[string]string)
 	kv.applyMap = make(map[int64][]chan string)
 	kv.doneMap = make(map[int64]bool)
 
@@ -189,13 +211,14 @@ func (kv *ShardKV) apply() {
 				d.Decode(&kv.doneMap)
 			} else {
 				op := msg.Command.(Op)
+				shard := key2shard(op.Key)
 				if !kv.doneMap[op.Id] {
 					if op.Type == "Put" {
-						kv.kvStore[op.Key] = op.Val
+						kv.kvStore[shard][op.Key] = op.Val
 					} else if op.Type == "Append" {
-						kv.kvStore[op.Key] += op.Val
+						kv.kvStore[shard][op.Key] += op.Val
 					} else if op.Type == "Get" {
-						val = kv.kvStore[op.Key]
+						val = kv.kvStore[shard][op.Key]
 					}
 				}
 				kv.doneMap[op.Id] = true
@@ -230,24 +253,4 @@ func (kv *ShardKV) snapshot() {
 
 	kv.rf.Snapshot(data, kv.lastIncludedIndex, kv.lastIncludedTerm)
 	DPrintf("[snapshot] me: %d, lastIncludedIndex: %d, lastIncludedTerm: %d", kv.me, kv.lastIncludedIndex, kv.lastIncludedTerm)
-}
-
-func (kv *ShardKV) fetchConfig() {
-	for {
-		config := kv.sm.Query(-1)
-		shards := []int{}
-		for i, g := range config.Shards {
-			g1 := kv.config.Shards[i]
-			if g == kv.gid && g1 != kv.gid {
-				shards = append(shards, i)
-			}
-		}
-		go kv.fetchShards(shards)
-		kv.config = config
-		time.Sleep(fetchConfigInterval)
-	}
-}
-
-func (kv *ShardKV) fetchShards(shards []int) {
-
 }

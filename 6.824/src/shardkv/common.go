@@ -45,3 +45,15 @@ type GetReply struct {
 	Err         Err
 	Value       string
 }
+
+type FetchShardsArgs struct {
+    Id int64
+    Gid int
+    Shards []int
+}
+
+type FetchShardsReply struct {
+    WrongLeader bool
+    Err         Err
+    KvStore     map[int]map[string]string
+}
