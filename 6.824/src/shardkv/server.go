@@ -10,6 +10,8 @@ import (
 	"log"
 	"bytes"
 	"fmt"
+	"6.824/shardmaster"
+	"time"
 )
 
 const Debug = 1
@@ -42,6 +44,8 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	sm       *shardmaster.Clerk
+	config   shardmaster.Config
 	kvStore           map[string]string
 	applyMap          map[int64][]chan string // apply channel for each request
 	doneMap           map[int64]bool          // processed request, to prevent repeating
@@ -49,6 +53,7 @@ type ShardKV struct {
 	lastIncludedTerm  int
 }
 
+const fetchConfigInterval = time.Second
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
@@ -63,9 +68,12 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *ShardKV) operate(op Op) (bool, Err, string) {
-	_, _, isLeader := kv.rf.Start(op)
 	msg := fmt.Sprintf("[operate] me: %d, op: %+v", kv.me, op)
 	//DPrintf(msg)
+	if kv.config.Shards[key2shard(op.Key)] != kv.gid {
+		return false, ErrWrongGroup, ""
+	}
+	_, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		return true, "not leader", ""
 	}
@@ -154,11 +162,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.doneMap = make(map[int64]bool)
 
 	// Use something like this to talk to the shardmaster:
-	// kv.mck = shardmaster.MakeClerk(kv.masters)
+	kv.sm = shardmaster.MakeClerk(kv.masters)
+	kv.config = kv.sm.Query(-1)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh, fmt.Sprintf("shardkv-%d", gid))
 
+	go kv.fetchConfig()
 	return kv
 }
 
@@ -220,4 +230,24 @@ func (kv *ShardKV) snapshot() {
 
 	kv.rf.Snapshot(data, kv.lastIncludedIndex, kv.lastIncludedTerm)
 	DPrintf("[snapshot] me: %d, lastIncludedIndex: %d, lastIncludedTerm: %d", kv.me, kv.lastIncludedIndex, kv.lastIncludedTerm)
+}
+
+func (kv *ShardKV) fetchConfig() {
+	for {
+		config := kv.sm.Query(-1)
+		shards := []int{}
+		for i, g := range config.Shards {
+			g1 := kv.config.Shards[i]
+			if g == kv.gid && g1 != kv.gid {
+				shards = append(shards, i)
+			}
+		}
+		go kv.fetchShards(shards)
+		kv.config = config
+		time.Sleep(fetchConfigInterval)
+	}
+}
+
+func (kv *ShardKV) fetchShards(shards []int) {
+
 }
