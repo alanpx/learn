@@ -31,7 +31,6 @@ type Op struct {
 	Type string // Get Put Append
 	Key string
 	Val string
-	Config shardmaster.Config
 }
 
 type ShardKV struct {
@@ -114,29 +113,40 @@ func (kv *ShardKV) operate(op Op) (bool, Err, string) {
 	}
 }
 
-func (kv *ShardKV) fetchConfig() {
-    for {
-        config := kv.sm.Query(-1)
-		kv.updateConfig(config)
-        time.Sleep(fetchConfigInterval)
+func (kv *ShardKV) sendFetchShards(gid int, args *FetchShardsArgs, reply *FetchShardsReply) {
+    if servers, ok := kv.config.Groups[gid]; ok {
+        // try each server for the shard.
+        for si := 0; si < len(servers); si++ {
+            srv := kv.make_end(servers[si])
+            ok := srv.Call("ShardKV.FetchShards", &args, &reply)
+            if ok && reply.WrongLeader == false {
+                return
+            }
+        }
     }
 }
 
-func (kv *ShardKV) updateConfig(config shardmaster.Config) {
-	shards := make(map[int][]int)
-	for i, g := range config.Shards {
-		g1 := kv.config.Shards[i]
-		if g == kv.gid && g1 != kv.gid {
-			shards[] = append(shards, i)
-		}
-	}
-	arg := FetchShardsArgs{Gid:}
-	go kv.sendFetchShards(shards)
-	kv.config = config
-}
+func (kv *ShardKV) FetchShards(args *FetchShardsArgs, reply *FetchShardsReply) {
+    _, isLeader := kv.rf.GetState()
+    if !isLeader {
+        reply.WrongLeader = true
+        return
+    }
 
-func (kv *ShardKV) sendFetchShards(shards []int) {
+    if args.Num != kv.config.Num {
+        reply.Err = ErrWrongGroup
+        return
+    }
 
+    reply.KvStore = make(map[int]map[string]string)
+    for i := range args.Shards {
+        if kv.config.Shards[i] != kv.gid {
+            reply.Err = ErrWrongGroup
+            return
+        }
+        reply.KvStore[i] = kv.kvStore[i]
+    }
+    reply.Err = OK
 }
 
 //
@@ -266,4 +276,52 @@ func (kv *ShardKV) snapshot() {
 
 	kv.rf.Snapshot(data, kv.lastIncludedIndex, kv.lastIncludedTerm)
 	DPrintf("[snapshot] me: %d, lastIncludedIndex: %d, lastIncludedTerm: %d", kv.me, kv.lastIncludedIndex, kv.lastIncludedTerm)
+}
+
+func (kv *ShardKV) fetchConfig() {
+    for {
+        if _, isLeader := kv.rf.GetState(); isLeader {
+            config := kv.sm.Query(-1)
+            kv.updateConfig(config)
+        }
+        time.Sleep(fetchConfigInterval)
+    }
+}
+
+func (kv *ShardKV) updateConfig(config shardmaster.Config) {
+    if config.Num == kv.config.Num {
+        return
+    }
+
+    kv.mu.Lock()
+    defer kv.mu.Unlock()
+    shards := make(map[int]int)
+    for i, g := range config.Shards {
+        g1 := kv.config.Shards[i]
+        if g == kv.gid && g1 != kv.gid {
+            shards[i] = 0
+        }
+    }
+    for shard := range shards {
+        for num := config.Num; num > 0; num-- {
+            arg := FetchShardsArgs{Shards: []int{shard}}
+            reply := FetchShardsReply{}
+            var conf shardmaster.Config
+            if num == kv.config.Num {
+                conf = kv.config
+            } else {
+                conf = kv.sm.Query(num)
+            }
+            gid := conf.Shards[shard]
+            arg.Num = conf.Num
+            kv.sendFetchShards(gid, &arg, &reply)
+            if reply.Err == OK {
+                for sh := range reply.KvStore {
+                    kv.kvStore[sh] = reply.KvStore[sh]
+                }
+                break
+            }
+        }
+    }
+    kv.config = config
 }
