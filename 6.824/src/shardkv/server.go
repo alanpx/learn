@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"6.824/shardmaster"
 	"time"
+	"sort"
 )
 
 const Debug = 1
@@ -51,6 +52,8 @@ type ShardKV struct {
 	doneMap           map[int64]bool             // processed request, to prevent repeating
 	lastIncludedIndex int
 	lastIncludedTerm  int
+	// map[shard]state, state -1:in transfer >=0:count of update or append requests in process
+	shardState        map[int]int
 }
 
 const fetchConfigInterval = time.Second
@@ -68,22 +71,42 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *ShardKV) operate(op Op) (bool, Err, string) {
-	msg := fmt.Sprintf("[operate] me: %d, op: %+v", kv.me, op)
+	shard := key2shard(op.Key)
+	msg := fmt.Sprintf("[operate] me: %d, gid: %d, config: %+v, op: %+v, shard: %d", kv.me, kv.gid, kv.config, op, shard)
 	//DPrintf(msg)
 
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
+		msg += ", GetState not leader"
+		//DPrintf(msg)
 		return true, "not leader", ""
 	}
-	if kv.config.Shards[key2shard(op.Key)] != kv.gid {
+
+	kv.mu.Lock()
+	gid := kv.config.Shards[shard]
+	if op.Type == "Put" || op.Type == "Append" {
+		if state, ok := kv.shardState[shard]; ok && state == -1 {
+			msg += ", in transfer"
+			DPrintf(msg)
+			kv.mu.Unlock()
+			return false, ErrWrongGroup, ""
+		}
+		kv.shardState[shard]++
+	}
+	kv.mu.Unlock()
+	if gid != kv.gid {
 		config := kv.sm.Query(-1)
 		kv.updateConfig(config)
 		if config.Shards[key2shard(op.Key)] != kv.gid {
+			msg += ", wrong group"
+			DPrintf(msg)
 			return false, ErrWrongGroup, ""
 		}
 	}
 	_, _, isLeader = kv.rf.Start(op)
 	if !isLeader {
+		msg += ", Start not leader"
+		DPrintf(msg)
 		return true, "not leader", ""
 	}
 
@@ -106,6 +129,11 @@ func (kv *ShardKV) operate(op Op) (bool, Err, string) {
 		if len(kv.applyMap[op.Id]) == 0 {
 			delete(kv.applyMap, op.Id)
 		}
+		if op.Type == "Put" || op.Type == "Append" {
+			if state, ok := kv.shardState[shard]; ok && state > 0 {
+				kv.shardState[shard]--
+			}
+		}
 		kv.mu.Unlock()
 		msg += fmt.Sprintf(", value: %s", value)
 		DPrintf(msg)
@@ -113,40 +141,65 @@ func (kv *ShardKV) operate(op Op) (bool, Err, string) {
 	}
 }
 
-func (kv *ShardKV) sendFetchShards(gid int, args *FetchShardsArgs, reply *FetchShardsReply) {
-    if servers, ok := kv.config.Groups[gid]; ok {
-        // try each server for the shard.
-        for si := 0; si < len(servers); si++ {
-            srv := kv.make_end(servers[si])
-            ok := srv.Call("ShardKV.FetchShards", &args, &reply)
-            if ok && reply.WrongLeader == false {
-                return
-            }
-        }
-    }
+func (kv *ShardKV) sendFetchShards(servers []string, args *FetchShardsArgs, reply *FetchShardsReply) {
+	msg := fmt.Sprintf("[sendFetchShards] servers: %+v, args: %+v", servers, *args)
+	for si := 0; si < len(servers); si++ {
+		srv := kv.make_end(servers[si])
+		ok := srv.Call("ShardKV.FetchShards", args, reply)
+		if ok && reply.WrongLeader == false && reply.Err == OK {
+			msg += fmt.Sprintf(", reply: %+v", *reply)
+			DPrintf(msg)
+			return
+		}
+	}
+	msg += ", failed"
+	DPrintf(msg)
 }
 
 func (kv *ShardKV) FetchShards(args *FetchShardsArgs, reply *FetchShardsReply) {
-    _, isLeader := kv.rf.GetState()
-    if !isLeader {
+	reply.WrongLeader = false
+	reply.Err = ""
+	reply.KvStore = make(map[int]map[string]string)
+	msg := fmt.Sprintf("[FetchShards] me: %d, gid: %d, conf: %+v, args: %+v", kv.me, kv.gid, kv.config, *args)
+	//DPrintf(msg)
+    if _, isLeader := kv.rf.GetState(); !isLeader {
         reply.WrongLeader = true
+		msg += fmt.Sprintf(", reply: %+v", *reply)
+		//DPrintf(msg)
         return
     }
 
-    if args.Num != kv.config.Num {
-        reply.Err = ErrWrongGroup
-        return
-    }
+    // config uninitialized
+	if kv.config.Num == 0 {
+		return
+	}
 
-    reply.KvStore = make(map[int]map[string]string)
-    for i := range args.Shards {
-        if kv.config.Shards[i] != kv.gid {
+    kv.mu.Lock()
+    defer kv.mu.Unlock()
+    for _, shard := range args.Shards {
+        if kv.config.Shards[shard] != kv.gid {
             reply.Err = ErrWrongGroup
-            return
+			msg += fmt.Sprintf(", reply: %+v", *reply)
+			DPrintf(msg)
+			return
         }
-        reply.KvStore[i] = kv.kvStore[i]
+        if state, ok := kv.shardState[shard]; ok && state > 0 {
+			msg += fmt.Sprintf(", shard %d requests in process", shard)
+			DPrintf(msg)
+			reply.Err = ErrWrongGroup
+			return
+		}
+		kv.shardState[shard] = -1
+        reply.KvStore[shard] = kv.kvStore[shard]
     }
     reply.Err = OK
+	msg += fmt.Sprintf(", reply: %+v", *reply)
+	DPrintf(msg)
+
+	// remove unneeded shard
+	for i := range reply.KvStore {
+		kv.config.Shards[i] = 0
+	}
 }
 
 //
@@ -205,6 +258,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.kvStore = make(map[int]map[string]string)
 	kv.applyMap = make(map[int64][]chan string)
 	kv.doneMap = make(map[int64]bool)
+	kv.shardState = make(map[int]int)
 
 	// Use something like this to talk to the shardmaster:
 	kv.sm = shardmaster.MakeClerk(kv.masters)
@@ -213,7 +267,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh, fmt.Sprintf("shardkv-%d", gid))
 
+	go kv.apply()
 	go kv.fetchConfig()
+	//DPrintf("[StartServer] me: %d, gid: %d, config: %+v", me, gid, kv.config)
 	return kv
 }
 
@@ -221,7 +277,7 @@ func (kv *ShardKV) apply() {
 	for {
 		select {
 		case msg := <-kv.applyCh:
-			DPrintf("[apply] me: %d, msg: %+v", kv.me, msg)
+			//DPrintf("[apply] me: %d, msg: %+v", kv.me, msg)
 			kv.mu.Lock()
 			var ch []chan string
 			var val string
@@ -235,14 +291,16 @@ func (kv *ShardKV) apply() {
 			} else {
 				op := msg.Command.(Op)
 				shard := key2shard(op.Key)
+				if _, ok := kv.kvStore[shard]; !ok {
+					kv.kvStore[shard] = make(map[string]string)
+				}
 				if !kv.doneMap[op.Id] {
 					if op.Type == "Put" {
 						kv.kvStore[shard][op.Key] = op.Val
 					} else if op.Type == "Append" {
 						kv.kvStore[shard][op.Key] += op.Val
-					} else if op.Type == "Get" {
-						val = kv.kvStore[shard][op.Key]
 					}
+					val = kv.kvStore[shard][op.Key]
 				}
 				kv.doneMap[op.Id] = true
 				ch = kv.applyMap[op.Id]
@@ -289,39 +347,69 @@ func (kv *ShardKV) fetchConfig() {
 }
 
 func (kv *ShardKV) updateConfig(config shardmaster.Config) {
-    if config.Num == kv.config.Num {
+	if config.Num == kv.config.Num {
         return
     }
 
-    kv.mu.Lock()
-    defer kv.mu.Unlock()
-    shards := make(map[int]int)
-    for i, g := range config.Shards {
-        g1 := kv.config.Shards[i]
-        if g == kv.gid && g1 != kv.gid {
-            shards[i] = 0
+	// config initialization
+	kv.mu.Lock()
+	if kv.config.Num == 0 {
+		if config.Num == 1 {
+			kv.config = config
+		} else if config.Num > 1 {
+			kv.config = kv.sm.Query(1)
+		}
+	}
+	kv.mu.Unlock()
+	msg := fmt.Sprintf("[updateConfig] me: %d, gid: %d, kv.config: %+v, config: %+v", kv.me, kv.gid, kv.config, config)
+
+    var need []int
+    for i, newGid := range config.Shards {
+        oldGid := kv.config.Shards[i]
+        if newGid == kv.gid && oldGid != kv.gid {
+            need = append(need, i)
         }
     }
-    for shard := range shards {
-        for num := config.Num; num > 0; num-- {
-            arg := FetchShardsArgs{Shards: []int{shard}}
-            reply := FetchShardsReply{}
-            var conf shardmaster.Config
-            if num == kv.config.Num {
-                conf = kv.config
-            } else {
-                conf = kv.sm.Query(num)
-            }
-            gid := conf.Shards[shard]
-            arg.Num = conf.Num
-            kv.sendFetchShards(gid, &arg, &reply)
-            if reply.Err == OK {
-                for sh := range reply.KvStore {
-                    kv.kvStore[sh] = reply.KvStore[sh]
-                }
-                break
-            }
-        }
-    }
-    kv.config = config
+	if len(need) == 0 {
+		return
+	}
+
+    msg += fmt.Sprintf(", need: %+v", need)
+    DPrintf(msg)
+    kv.config.Num = config.Num
+    kv.config.Groups = config.Groups
+    sort.Ints(need)
+	for _, shard := range need {
+	loop:
+		for {
+			for num := config.Num - 1; num > 0; num-- {
+				arg := FetchShardsArgs{Shards: []int{shard}}
+				reply := FetchShardsReply{}
+				var conf shardmaster.Config
+				if num == kv.config.Num {
+					conf = kv.config
+				} else {
+					conf = kv.sm.Query(num)
+				}
+				gid := conf.Shards[shard]
+				kv.sendFetchShards(conf.Groups[gid], &arg, &reply)
+				if reply.Err == OK {
+					msg += fmt.Sprintf(", fetch shard %d success", shard)
+					//DPrintf(msg)
+					kv.mu.Lock()
+					kv.config.Shards[shard] = kv.gid
+					if state, ok := kv.shardState[shard]; ok && state == -1 {
+						delete(kv.shardState, shard)
+					}
+					for sh := range reply.KvStore {
+						kv.kvStore[sh] = reply.KvStore[sh]
+					}
+					kv.mu.Unlock()
+					break loop
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+    DPrintf(msg)
 }

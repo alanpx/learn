@@ -191,7 +191,7 @@ func (sm *ShardMaster) apply() {
 					} else if op.Type == "Query" {
 						if op.QueryArgs.Num == -1 {
 							config = *sm.configs[len(sm.configs)-1].copy()
-						} else {
+						} else if op.QueryArgs.Num < len(sm.configs) {
 							config = *sm.configs[op.QueryArgs.Num].copy()
 						}
 					}

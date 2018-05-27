@@ -47,7 +47,6 @@ type GetReply struct {
 }
 
 type FetchShardsArgs struct {
-    Num int
     Shards []int
 }
 

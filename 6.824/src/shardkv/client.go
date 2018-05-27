@@ -12,7 +12,9 @@ import "6.824/labrpc"
 import "crypto/rand"
 import "math/big"
 import "6.824/shardmaster"
-import "time"
+import (
+	"time"
+)
 
 //
 // which shard is a key in?
@@ -106,17 +108,19 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	//msg := fmt.Sprintf("[PutAppend] args: %+v", args)
+	//DPrintf(msg)
 
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
+		//DPrintf("%s, shard: %d, gid: %d, config: %+v", msg, shard, gid, ck.config)
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				DPrintf("[PutAppend] server: %d, args: %+v, ok: %v, reply:%+v", si, args, ok, reply)
+				//DPrintf("%s, server: %s, reply: %+v", msg, servers[si], reply)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
 					return
 				}
