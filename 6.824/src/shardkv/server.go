@@ -333,7 +333,7 @@ func (kv *ShardKV) snapshot() {
 	data := w.Bytes()
 
 	kv.rf.Snapshot(data, kv.lastIncludedIndex, kv.lastIncludedTerm)
-	DPrintf("[snapshot] me: %d, lastIncludedIndex: %d, lastIncludedTerm: %d", kv.me, kv.lastIncludedIndex, kv.lastIncludedTerm)
+	DPrintf("[snapshot] me: %d, gid: %d, lastIncludedIndex: %d, lastIncludedTerm: %d", kv.me, kv.gid,kv.lastIncludedIndex, kv.lastIncludedTerm)
 }
 
 func (kv *ShardKV) fetchConfig() {

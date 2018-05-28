@@ -27,6 +27,7 @@ import (
     "sort"
     "bytes"
     "encoding/gob"
+    "strings"
 )
 
 
@@ -369,7 +370,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         return
     }
 
-    // args.Entries begin with the very first log
+    // args.Entries begin with the first log
     if args.PrevLogIndex <= 0 {
         reply.Success = true
         rf.log = append(make([]Log, 1), args.Entries...)
@@ -409,6 +410,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         reply.Success = true
         rf.log = append(rf.log[:prevLogIndex+1], args.Entries...)
         rf.persist()
+        rf.DPrintf(msg + ", prevLogTerm matches")
         return
     }
 
@@ -437,7 +439,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         rf.persist()
     }
     msg += fmt.Sprintf(", reply: %+v, log: %+v, commitIndex: %d->%d, lastApplied: %d", *reply, rf.log, oldCommitIndex, rf.commitIndex, rf.lastApplied)
-    //rf.DPrintf(msg)
+    rf.DPrintf(msg)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -513,7 +515,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
             }
         }
         msg += fmt.Sprintf(", logLen: %d, commitIndex: %d, matchIndex: %+v, nextIndex: %+v", len(rf.log), rf.commitIndex, rf.matchIndex, rf.nextIndex)
-        //rf.DPrintf(msg)
+        rf.DPrintf(msg)
     }
     //rf.DPrintf(msg)
     return ok
@@ -525,6 +527,7 @@ type InstallSnapshotArgs struct {
     LastIncludedIndex int
     LastIncludedTerm int
     Offset int
+    TotalLength int
     Data []byte
     Done bool
 }
@@ -536,6 +539,8 @@ type InstallSnapshotReply struct {
 func (rf *Raft) InstallSnapshot(args * InstallSnapshotArgs, reply *InstallSnapshotReply) {
     rf.mu.Lock()
     defer rf.mu.Unlock()
+    msg := fmt.Sprintf("[InstallSnapshot] args: %+v", *args)
+    rf.DPrintf(msg)
     reply.Term = rf.currentTerm
     if args.Term < rf.currentTerm {
         return
@@ -544,12 +549,10 @@ func (rf *Raft) InstallSnapshot(args * InstallSnapshotArgs, reply *InstallSnapsh
     rf.hasSnapshot = true
     rf.lastIncludedIndex = args.LastIncludedIndex
     rf.lastIncludedTerm = args.LastIncludedTerm
-    if len(rf.snapshot) < len(args.Data) + args.Offset {
-        rf.snapshot = append(rf.snapshot, make([]byte, len(args.Data) + args.Offset - len(rf.snapshot))...)
-        rf.snapshot = append(rf.snapshot, args.Data...)
-    } else {
-        rf.snapshot = append(rf.snapshot[:args.Offset], append(args.Data, rf.snapshot[args.Offset+len(args.Data):]...)...)
+    if args.Offset == 0 {
+        rf.snapshot = make([]byte, args.TotalLength)
     }
+    copy(rf.snapshot[args.Offset:args.Offset+len(args.Data)], args.Data)
     rf.log = make([]Log, 0)
     if args.Done {
         rf.isSnapshotComplete = true
@@ -700,6 +703,7 @@ func (rf *Raft) heartBeat() {
                     LastIncludedIndex: rf.lastIncludedIndex,
                     LastIncludedTerm: rf.lastIncludedTerm,
                     Offset: 0,
+                    TotalLength:len(rf.snapshot),
                     Data: rf.snapshot,
                     Done: true,
                 }
@@ -898,7 +902,14 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 }
 
 func (rf *Raft) DPrintf(format string, a ...interface{}) {
-    DPrintf(fmt.Sprintf("[%s] %s", rf.name, format), a...)
+    f := fmt.Sprintf("[%s] %s", rf.name, format)
+    ignore := []string{"shardmaster"}
+    for _, s := range ignore {
+        if strings.Contains(f, s) {
+            return
+        }
+    }
+    DPrintf(f, a...)
 }
 
 func getElectionTimeout() time.Duration {
