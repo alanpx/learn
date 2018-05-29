@@ -93,24 +93,20 @@ func (kv *ShardKV) operate(op Op) (bool, Err, string) {
 		}
 		kv.shardState[shard]++
 	}
-	kv.mu.Unlock()
 	if gid != kv.gid {
-		config := kv.sm.Query(-1)
-		kv.updateConfig(config)
-		if config.Shards[key2shard(op.Key)] != kv.gid {
-			msg += ", wrong group"
-			DPrintf(msg)
-			return false, ErrWrongGroup, ""
-		}
-	}
+        msg += ", wrong group"
+        DPrintf(msg)
+        kv.mu.Unlock()
+        return false, ErrWrongGroup, ""
+    }
 	_, _, isLeader = kv.rf.Start(op)
 	if !isLeader {
 		msg += ", Start not leader"
 		DPrintf(msg)
-		return true, "not leader", ""
+        kv.mu.Unlock()
+        return true, "not leader", ""
 	}
 
-	kv.mu.Lock()
 	ch := make(chan string)
 	i := 0
 	_, exist := kv.applyMap[op.Id]

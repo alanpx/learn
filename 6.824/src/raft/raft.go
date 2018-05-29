@@ -45,6 +45,10 @@ type ApplyMsg struct {
     RaftStateSize int
 }
 
+func (arg ApplyMsg) String() string{
+    return fmt.Sprintf("Index: %d, Term: %d, Command: %+v, UseSnapshot: %v, SnapshotLen: %d, RaftStateSize: %d", arg.Index, arg.Term, arg.Command, arg.UseSnapshot, len(arg.Snapshot), arg.RaftStateSize)
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -328,8 +332,12 @@ type AppendEntriesArgs struct {
 	Round int  // for debug
 }
 
-func (arg AppendEntriesArgs)String() string{
-    return fmt.Sprintf("Term: %d, LeaderId: %d, PrevLogIndex: %d, PrevLogTerm: %d, EntriesLen: %d, Entries: %+v, LeaderCommit: %d, Round: %d", arg.Term, arg.LeaderId, arg.PrevLogIndex, arg.PrevLogTerm, len(arg.Entries), arg.Entries, arg.LeaderCommit, arg.Round)
+func (arg AppendEntriesArgs) String() string{
+    str := ""
+    if len(arg.Entries) > 0 {
+        str = fmt.Sprintf("%+v", arg.Entries[0])
+    }
+    return fmt.Sprintf("Term: %d, LeaderId: %d, PrevLogIndex: %d, PrevLogTerm: %d, EntriesLen: %d, FirstEntry: %s, LeaderCommit: %d, Round: %d", arg.Term, arg.LeaderId, arg.PrevLogIndex, arg.PrevLogTerm, len(arg.Entries), str, arg.LeaderCommit, arg.Round)
 }
 
 type AppendEntriesReply struct {
@@ -421,6 +429,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
             prevLogIndex = -1
             prevLogTerm = rf.lastIncludedTerm
         }
+    } else {
+        prevLogTerm = rf.log[args.PrevLogIndex].Term
     }
     if prevLogTerm == args.PrevLogTerm {
         reply.Success = true
@@ -503,7 +513,19 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
         copy(tmpMatch, rf.matchIndex)
         sort.Ints(tmpMatch)
         midIndex := tmpMatch[len(tmpMatch)/2]
-        if midIndex > rf.commitIndex {
+        midTerm := 0
+        if rf.hasSnapshot {
+            // the term is unknown if midIndex < rf.lastIncludedIndex
+            if midIndex > rf.lastIncludedIndex {
+                midTerm = rf.log[midIndex-rf.lastIncludedIndex-1].Term
+            } else if midIndex == rf.lastIncludedIndex {
+                midTerm = rf.lastIncludedTerm
+            }
+        } else {
+            midTerm = rf.log[midIndex].Term
+        }
+        // a leader can't determine commitment using log entries from older terms. see Figure 8 from raft paper
+        if midIndex > rf.commitIndex && midTerm == rf.currentTerm {
             rf.commitIndex = midIndex
             rf.newCommit <- true
         }
@@ -551,8 +573,13 @@ type InstallSnapshotArgs struct {
     Done bool
 }
 
+func (arg InstallSnapshotArgs) String() string{
+    return fmt.Sprintf("Term: %d, LeaderId: %d, LastIncludedIndex: %d, LastIncludedTerm: %d, Offset: %d, TotalLength: %+v, Done: %v", arg.Term, arg.LeaderId, arg.LastIncludedIndex, arg.LastIncludedTerm, arg.Offset, arg.TotalLength, arg.Done)
+}
+
 type InstallSnapshotReply struct {
     Term int
+    Success bool
 }
 
 func (rf *Raft) InstallSnapshot(args * InstallSnapshotArgs, reply *InstallSnapshotReply) {
@@ -579,6 +606,7 @@ func (rf *Raft) InstallSnapshot(args * InstallSnapshotArgs, reply *InstallSnapsh
         rf.newCommit <- true
     }
 
+    reply.Success = true
     rf.persist()
     rf.persistSnapshot()
 }
@@ -587,6 +615,30 @@ func (rf *Raft) sendInstallSnapshot(server int, args * InstallSnapshotArgs, repl
     ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
     if !ok {
         return ok
+    }
+
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+    if rf.currentTerm < reply.Term {
+        rf.currentTerm = reply.Term
+        rf.votedFor = -1
+        rf.persist()
+        if rf.state != follower {
+            rf.state = follower
+            if rf.state == leader {
+                rf.beFollower <- true
+            } else if rf.state == candidate {
+                rf.electionDone <- true
+            }
+        }
+    }
+    if args.Term < reply.Term {
+        return ok
+    }
+
+    if reply.Success {
+        rf.nextIndex[server] = args.LastIncludedIndex + 1
+        rf.matchIndex[server] = rf.nextIndex[server] - 1
     }
     return true
 }
@@ -618,7 +670,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
         term = rf.currentTerm
         rf.log = append(rf.log, Log{ Term:rf.currentTerm, Command:command })
         rf.persist()
-        rf.DPrintf("[Start] server: %+v, command: %+v, index: %d", struct{term, me int}{rf.currentTerm,rf.me}, command, index)
+        rf.DPrintf("[Start] server: %+v, command: %+v, index: %d, hasSnapshot: %v, lastIncludedIndex: %d", struct{term, me int}{rf.currentTerm,rf.me}, command, index, rf.hasSnapshot, rf.lastIncludedIndex)
     }
     return index, term, isLeader
 }
@@ -923,20 +975,21 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
             lastApplied := rf.lastApplied
             commitIndex := rf.commitIndex
             lastIncludedIndex := rf.lastIncludedIndex
-            msg := ApplyMsg{}
+            applyMsg := ApplyMsg{}
             if hasSnapshot && lastApplied < lastIncludedIndex {
-                msg.UseSnapshot = true
-                msg.Snapshot = rf.snapshot
-                msg.RaftStateSize = rf.persister.RaftStateSize()
+                applyMsg.UseSnapshot = true
+                applyMsg.Snapshot = rf.snapshot
+                applyMsg.RaftStateSize = rf.persister.RaftStateSize()
                 rf.lastApplied = lastIncludedIndex
             } else {
                 rf.lastApplied = rf.commitIndex
             }
             rf.mu.Unlock()
 
-            if msg.UseSnapshot {
-                applyCh <- msg
-                rf.DPrintf("[apply] server: %d, msg: %+v", me, msg)
+            msg := fmt.Sprintf("[apply] server: %d, lastApplied: %d, commitIndex: %d, UseSnapshot: %v", me, lastApplied, commitIndex, applyMsg.UseSnapshot)
+            DPrintf(msg)
+            if applyMsg.UseSnapshot {
+                applyCh <- applyMsg
             } else {
                 for i := lastApplied+1; i <= commitIndex; i++ {
                     logIndex := i
@@ -944,12 +997,11 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
                         logIndex = i - lastIncludedIndex - 1
                     }
                     l := rf.log[logIndex]
-                    msg.Term = l.Term
-                    msg.Command = l.Command
-                    msg.Index = i
-                    msg.RaftStateSize = rf.persister.RaftStateSize()
-                    applyCh <- msg
-                    rf.DPrintf("[apply] server: %d, msg: %+v", me, msg)
+                    applyMsg.Term = l.Term
+                    applyMsg.Command = l.Command
+                    applyMsg.Index = i
+                    applyMsg.RaftStateSize = rf.persister.RaftStateSize()
+                    applyCh <- applyMsg
                 }
             }
         }
