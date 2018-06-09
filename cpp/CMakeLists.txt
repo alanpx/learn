@@ -7,9 +7,9 @@ include_directories("/Users/xp/devspace/opensource/leveldb/include")
 include_directories("/usr/local/BerkeleyDB.6.2/include/")
 
 set(SOURCE_FILES
-        c++/src/link_list.cpp
-        c++/src/main.cpp
-        c++/src/tree.cpp)
+    link_list.cpp
+    main.cpp
+    tree.cpp)
 
 add_executable(learn ${SOURCE_FILES})
 target_link_libraries(learn "/Users/xp/devspace/opensource/leveldb/out-static/libleveldb.a")

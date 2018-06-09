@@ -1,7 +1,0 @@
-.DS_Store
-.idea/
-CMakeFiles/
-cmake-build-debug/
-go/build/
-go/pkg/
-go/main.go
