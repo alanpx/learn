@@ -25,7 +25,7 @@ type BTree struct {
 type BtreeConf struct {
     fileName string
     pageSize uint32
-    degree   int // minimum degree
+    degree   int // number of elements is between [degree, 2*degree]
 }
 type btreeNode struct {
     elements []BTreeElem
