@@ -31,6 +31,7 @@ type BtreeConf struct {
      */
     Degree    int
     MaxKeyLen uint32
+    maxValLen uint32  // one element should be accommodated by one page
 }
 type btreeNode struct {
     elements []BTreeElem
@@ -44,6 +45,7 @@ type btreeNode struct {
 type BTreeElem struct {
     Key KeyType
     Val ValueType
+    padding uint16 // length of padding zeros for Val
 }
 type KeyType []byte
 type ValueType []byte
@@ -63,6 +65,11 @@ func NewBTree(conf *BtreeConf) *BTree {
         // 2*pageNoSize + elementLenSize + (2*Degree-1)*keySize + (2*Degree)*pageNoSize <= PageSize
         conf.Degree = int((conf.PageSize - 2*pageNoSize - elementLenSize + keySize) / (2*pageNoSize + 2*keySize))
     }
+    conf.maxValLen = conf.PageSize - uint32(1+2*unsafe.Sizeof(pageNoType(0))+unsafe.Sizeof(elementLenType(0))+unsafe.Sizeof(keyLenType(0))+unsafe.Sizeof(valueLenType(0))+2) - conf.MaxKeyLen
+    if conf.maxValLen <= 0 {
+        return nil
+    }
+
     t := BTree{}
     t.BtreeConf = conf
     t.root = t.newBtreeNode(nil, nil)
@@ -89,13 +96,13 @@ func (tree *BTree) BulkBuild(sortedElements ...BTreeElem) {
     var node *btreeNode
     leaf := tree.newBtreeNode(nil, nil)
     for _, ele := range sortedElements {
-        if tree.nodeSize(leaf)+tree.eleSize(&ele) < tree.PageSize {
+        if tree.leafNodeSize(leaf)+tree.eleSize(&ele) < tree.PageSize {
             leaf.elements = append(leaf.elements, ele)
             continue
         }
         node = nodeStack[len(nodeStack)-1]
         if len(node.children) > 0 {
-            node.elements = append(node.elements, BTreeElem{leaf.elements[0].Key, nil})
+            node.elements = append(node.elements, BTreeElem{leaf.elements[0].Key, nil, 0})
         }
         node.children = append(node.children, leaf)
         tree.dirtyNode[node.pageNo] = node
@@ -120,7 +127,7 @@ func (tree *BTree) BulkBuild(sortedElements ...BTreeElem) {
     if len(leaf.elements) > 0 {
         node = nodeStack[len(nodeStack)-1]
         if len(node.children) > 0 {
-            node.elements = append(node.elements, BTreeElem{leaf.elements[0].Key, nil})
+            node.elements = append(node.elements, BTreeElem{leaf.elements[0].Key, nil, 0})
         }
         node.children = append(node.children, leaf)
         tree.dirtyNode[node.pageNo] = node
@@ -129,25 +136,29 @@ func (tree *BTree) BulkBuild(sortedElements ...BTreeElem) {
 }
 func (tree *BTree) Add(elements ...BTreeElem) {
     for _, ele := range elements {
-        tree.addToNode(ele, tree.root)
+        if len(ele.Val) > int(tree.maxValLen) {
+            continue
+        }
+        tree.initPadding(&ele)
+        tree.addToNode(&ele, tree.root)
     }
 }
-func (tree *BTree) addToNode(ele BTreeElem, node *btreeNode) {
+func (tree *BTree) addToNode(ele *BTreeElem, node *btreeNode) bool {
     var i int
-    for i = len(node.elements) - 1; i >= 0; i-- {
-        if ele.compare(node.elements[i]) > 0 {
+    for i = 0; i < len(node.elements); i++ {
+        if ele.compare(node.elements[i]) < 0 {
             break
         } else if ele.compare(node.elements[i]) == 0 {
-            return
+            return false
         }
     }
     if node.isLeaf() {
-        node.elements = append(node.elements[:i+1], append([]BTreeElem{ele}, node.elements[i+1:]...)...)
+        node.elements = append(node.elements[:i], append([]BTreeElem{*ele}, node.elements[i:]...)...)
         tree.dirtyNode[node.pageNo] = node
     } else {
-        tree.addToNode(ele, node.children[i+1])
-        if tree.isNodeFull(node.children[i+1]) {
-            tree.splitChild(node, i+1)
+        tree.addToNode(ele, node.children[i])
+        if tree.isNodeFull(node.children[i]) {
+            tree.splitChild(node, i)
         }
     }
     if node == tree.root && tree.isNodeFull(node) {
@@ -155,6 +166,43 @@ func (tree *BTree) addToNode(ele BTreeElem, node *btreeNode) {
         tree.root = tree.newBtreeNode(nil, []*btreeNode{root})
         tree.splitChild(tree.root, 0)
     }
+    return true
+}
+func (tree *BTree) Update(ele BTreeElem) {
+    tree.updateToNode(&ele, tree.root)
+}
+func (tree *BTree) updateToNode(ele *BTreeElem, node *btreeNode) bool {
+    if node.isLeaf() {
+        var i int
+        for i = 0; i < len(node.elements); i++ {
+            if ele.compare(node.elements[i]) < 0 {
+                return false
+            } else if ele.compare(node.elements[i]) == 0 {
+                length := len(node.elements[i].Val)
+                padding := node.elements[i].padding
+                node.elements[i].Val = ele.Val
+                if len(ele.Val) > length + int(padding) {
+                    tree.initPadding(&node.elements[i])
+                } else {
+                    node.elements[i].padding = uint16(len(ele.Val) - length)
+                }
+                tree.dirtyNode[node.pageNo] = node
+                return true
+            }
+        }
+    } else {
+        var i int
+        for i = 0; i < len(node.elements); i++ {
+            if ele.compare(node.elements[i]) < 0 {
+                break
+            }
+        }
+        tree.updateToNode(ele, node.children[i])
+        if tree.isNodeFull(node.children[i]) {
+            tree.splitChild(node, i)
+        }
+    }
+    return false
 }
 func (tree *BTree) Rem(elements ...BTreeElem) {
     if len(tree.root.elements) == 0 {
@@ -292,8 +340,7 @@ func (tree *BTree) balanceChild(node *btreeNode, from int, to int) {
     tree.dirtyNode[f.pageNo] = f
     tree.dirtyNode[t.pageNo] = t
 }
-func (tree *BTree) Get(key KeyType) []BTreeElem {
-    var re []BTreeElem
+func (tree *BTree) Get(key KeyType) (bool, BTreeElem) {
     node := tree.root
     for node != nil {
         tree.loadNode(node)
@@ -301,7 +348,7 @@ func (tree *BTree) Get(key KeyType) []BTreeElem {
         for i = 0; i < len(node.elements); i++ {
             if node.elements[i].compareKey(key) == 0 {
                 if node.isLeaf() {
-                    re = append(re, node.elements[i])
+                    return true, node.elements[i]
                 }
             }
             if node.elements[i].compareKey(key) > 0 {
@@ -314,7 +361,7 @@ func (tree *BTree) Get(key KeyType) []BTreeElem {
             node = node.children[i]
         }
     }
-    return re
+    return false, BTreeElem{}
 }
 func (tree *BTree) GetByCond(cond func(BTreeElem) bool) []BTreeElem {
     var re []BTreeElem
@@ -347,7 +394,7 @@ func (tree *BTree) String() string {
             continue
         }
 
-        str += q[0].String() + " "
+        str += q[0].String() + " | "
         q = append(q[1:], q[0].children...)
         if q[0] == nil {
             q = append(q, nil)
@@ -357,10 +404,10 @@ func (tree *BTree) String() string {
 }
 func (node *btreeNode) String() string {
     var s []string
-    for _, v := range node.elements {
-        ele := fmt.Sprintf("%d", v.Key)
-        if len(v.Val) > 0 {
-            ele += fmt.Sprintf(":%d", v.Val)
+    for _, n := range node.elements {
+        ele := string(n.Key)
+        if len(n.Val) > 0 {
+            ele += ":" + string(n.Val)
         }
         s = append(s, ele)
     }
@@ -385,7 +432,7 @@ func (tree *BTree) LeafString() string {
 
 func (tree *BTree) serializeNode(node *btreeNode) (int64, []byte) {
     /* common:     isLeaf(bool) prev(pageNoType) next(pageNoType) elementLen(elementLenType)
-     * leaf node:  keyLen(keyLenType) element.Key valLen(valueLenType) element.Val
+     * leaf node:  keyLen(keyLenType) element.Key valLen(valueLenType) paddingLen(uint16) element.Val
      * inner node: keyLen(keyLenType) element.Key child.pageNo(pageNoType)
      */
     buf := new(bytes.Buffer)
@@ -409,9 +456,11 @@ func (tree *BTree) serializeNode(node *btreeNode) (int64, []byte) {
         binary.Write(buf, binary.LittleEndian, make([]byte, int(tree.MaxKeyLen) - len(ele.Key)))
         if node.isLeaf() {
             binary.Write(buf, binary.LittleEndian, valueLenType(len(ele.Val)))
+            binary.Write(buf, binary.LittleEndian, ele.padding)
             for _, val := range ele.Val {
                 binary.Write(buf, binary.LittleEndian, val)
             }
+            binary.Write(buf, binary.LittleEndian, make([]byte, ele.padding))
         }
     }
     if !node.isLeaf() {
@@ -572,12 +621,16 @@ func (tree *BTree) parseNode(data []byte, pageNo pageNoType, parseAll bool, page
             }
             reader.Seek(int64(tree.MaxKeyLen) - int64(keyLen), io.SeekCurrent)
             var valLen valueLenType
+            var paddingLen uint16
             binary.Read(reader, binary.LittleEndian, &valLen)
+            binary.Read(reader, binary.LittleEndian, &paddingLen)
+            ele.padding = paddingLen
             var val byte
             for j := valueLenType(0); j < valLen; j++ {
                 binary.Read(reader, binary.LittleEndian, &val)
                 ele.Val = append(ele.Val, val)
             }
+            reader.Seek(int64(paddingLen), io.SeekCurrent)
             node.elements = append(node.elements, ele)
         }
     } else {
@@ -628,7 +681,7 @@ func (tree *BTree) isNodeFull(node *btreeNode) bool {
     if !node.isLeaf() || tree.PageSize == 0 {
         full = len(node.elements) == 2*tree.Degree-1
     } else {
-        full = tree.PageSize < tree.nodeSize(node)
+        full = tree.PageSize < tree.leafNodeSize(node)
     }
     return full
 }
@@ -652,7 +705,7 @@ func (tree *BTree) splitChild(node *btreeNode, childIdx int) *btreeNode {
         var i int
         for i = len(fullNode.elements)-1; i >= 0; i-- {
             excessSize += tree.eleSize(&fullNode.elements[i])
-            if tree.nodeSize(fullNode) - excessSize <= tree.PageSize {
+            if tree.leafNodeSize(fullNode) - excessSize <= tree.PageSize {
                 break
             }
         }
@@ -704,7 +757,7 @@ func (tree *BTree) loadNode(node *btreeNode) {
 func (node *btreeNode) isLeaf() bool {
     return len(node.children) == 0
 }
-func (tree *BTree) nodeSize(node *btreeNode) uint32 {
+func (tree *BTree) leafNodeSize(node *btreeNode) uint32 {
     var size uint32
     if !node.isLeaf() {
         return size
@@ -721,7 +774,18 @@ func (tree *BTree) eleSize(ele *BTreeElem) uint32 {
     if ele == nil {
         return 0
     }
-    return uint32(unsafe.Sizeof(keyLenType(0))) + tree.MaxKeyLen + uint32(unsafe.Sizeof(valueLenType(0))) + uint32(len(ele.Val))
+    return uint32(unsafe.Sizeof(keyLenType(0))) + tree.MaxKeyLen + uint32(unsafe.Sizeof(valueLenType(0))) + 2 + uint32(len(ele.Val)) + uint32(ele.padding)
+}
+func (tree *BTree) initPadding(ele *BTreeElem) {
+    // keep 20% padding for future longer value
+    padding := len(ele.Val) / 5
+    if padding >= int(tree.maxValLen) - len(ele.Val) {
+        padding = int(tree.maxValLen) - len(ele.Val)
+    }
+    if padding > 1 << 16 - 1 {
+        padding = 1<<16 - 1
+    }
+    ele.padding = uint16(padding)
 }
 func (ele BTreeElem) compare(ele1 BTreeElem) int {
     return ele.compareKey(ele1.Key)
