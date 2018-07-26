@@ -7,115 +7,98 @@ import (
 )
 
 type SkipList struct {
-    head *skipListNode
-    total int      // count of nodes, to determine max level
-    maxLevel int   // level is between [0,maxLevel)
+    head     *skipListNode
+    total    int // count of nodes, to determine max level
+    maxLevel int // level is between [0,maxLevel)
 }
 type skipListNode struct {
-    key []byte
-    val []byte
+    key  []byte
+    val  []byte
     next []*skipListNode
 }
-func (sl *SkipList) Get(key []byte) []byte {
-    node, _ := sl.seek(key, false)
+type operType int
+
+const (
+    operGet operType = iota
+    operAdd
+    operUpdate
+    operRem
+)
+
+func (sl *SkipList) Get(key []byte) ([]byte, bool) {
+    node, _ := sl.seek(key, operGet)
     if node == nil || bytes.Compare(key, node.key) != 0 {
-        return nil
+        return nil, false
     }
-    return node.val
+    return node.val, true
 }
 func (sl *SkipList) Add(key []byte, val []byte) bool {
     sl.total++
-    sl.maxLevel = int(math.Log2(float64(sl.total)))
-    newNode := skipListNode{key, val, make([]*skipListNode, rand.Intn(sl.maxLevel+1))}
-    if sl.head == nil {
-        sl.head = &newNode
-        return true
+    sl.maxLevel = int(math.Ceil(math.Log2(float64(sl.total))))
+    if sl.maxLevel == 0 {
+        sl.maxLevel = 1
     }
-    cmp := bytes.Compare(key, sl.head.key)
-    if cmp < 0 {
-        newNode.next[0] = sl.head
-        sl.head = &newNode
-    } else if cmp == 0 {
+    level := rand.Intn(sl.maxLevel) + 1
+    newNode := skipListNode{key, val, make([]*skipListNode, level)}
+    node, prev := sl.seek(key, operAdd)
+    if node != nil && bytes.Compare(key, node.key) == 0 {
         return false
     }
+    if node == nil {
+        newNode.next[0] = sl.head
+        sl.head = &newNode
+    }
 
-    node := sl.head
-    level := len(sl.head.next) - 1
-    prev := make([]*skipListNode, len(newNode.next))
-    for level >= 0 {
-        if level < len(newNode.next) {
-            prev[level] = node
-        }
-        cmp := bytes.Compare(key, node.next[level].key)
-        if cmp > 0 {
-            node = node.next[level]
-            level = len(node.next) - 1
-        } else if cmp == 0 {
-            return false
-        } else {
-            level--
+    if node != nil && len(node.next) > 0 {
+        n := node.next[0]
+        level := 0
+        for n != nil && level < len(n.next) && level < len(newNode.next) {
+            if newNode.next[level] == nil {
+                newNode.next[level] = n
+            }
+            if level == len(n.next)-1 {
+                n = n.next[level]
+            } else {
+                level++
+            }
         }
     }
-    newNode.next[0] = node
 
-    for i := 0 ; i < len(newNode.next); i++ {
+    for i := 0; i < len(newNode.next) && i < len(prev) && prev[i] != nil; i++ {
         prev[i].next[i] = &newNode
     }
 
-    node = newNode.next[0]
-    level = 0
-    for level < len(node.next) {
-        if newNode.next[level] == nil {
-            newNode.next[level] = node
-        }
-        if level == len(node.next) - 1 {
-            node = node.next[level]
-        }
+    return true
+}
+func (sl *SkipList) Update(key []byte, val []byte) bool {
+    node, _ := sl.seek(key, operUpdate)
+    if node == nil || bytes.Compare(key, node.key) != 0 {
+        return false
     }
-
+    node.val = val
     return true
 }
 func (sl *SkipList) Rem(key []byte) bool {
-    if sl == nil || sl.head == nil {
-        return false
-    }
     sl.total--
-    cmp := bytes.Compare(key, sl.head.key)
-    if cmp < 0 {
+    node, prev := sl.seek(key, operRem)
+    if node == nil || bytes.Compare(key, node.key) != 0 {
         return false
-    } else if cmp == 0 {
-        sl.head = sl.head.next[0]
-        return true
+    }
+    if prev == nil {
+        sl.head = node.next[0]
     }
 
-    node := sl.head
-    level := len(sl.head.next) - 1
-    prev := make([]*skipListNode, sl.maxLevel)
-    for level >= 0 {
-        if level < len(prev) {
-            prev[level] = node
-        }
-        cmp := bytes.Compare(key, node.next[level].key)
-        if cmp > 0 {
-            node = node.next[level]
-            level = len(node.next) - 1
-        } else if cmp == 0 {
-            return false
-        } else {
-            level--
-        }
-    }
-
-    for level := 0; level < len(node.next); level++ {
-        prev[level].next[level] = node.next[level]
+    for i := 0; i < len(node.next) && i < len(prev) && prev[i] != nil; i++ {
+        prev[i].next[i] = node.next[i]
     }
     return true
 }
+
 /*
  * seek to the last node whose key is less than or equal the target key
  */
-func (sl *SkipList) seek(key []byte, withPrev bool) (*skipListNode, []*skipListNode) {
-    if sl == nil || sl.head == nil {
+func (sl *SkipList) seek(key []byte, oper operType) (*skipListNode, []*skipListNode) {
+    if sl.head == nil {
         return nil, nil
     }
     cmp := bytes.Compare(key, sl.head.key)
@@ -128,22 +111,61 @@ func (sl *SkipList) seek(key []byte, withPrev bool) (*skipListNode, []*skipListN
     node := sl.head
     level := len(sl.head.next) - 1
     var prev []*skipListNode
-    if withPrev {
+    if oper == operAdd || oper == operRem {
         prev = make([]*skipListNode, sl.maxLevel)
     }
     for level >= 0 {
-        if withPrev {
+        if oper == operAdd || oper == operRem {
             prev[level] = node
         }
-        cmp := bytes.Compare(key, node.next[level].key)
-        if cmp > 0 {
-            node = node.next[level]
-            level = len(node.next) - 1
-        } else if cmp == 0 {
-            return node, prev
+        if node.next[level] != nil {
+            cmp := bytes.Compare(key, node.next[level].key)
+            if cmp > 0 {
+                node = node.next[level]
+                level = len(node.next) - 1
+            } else if cmp == 0 {
+                if (oper == operGet || oper == operAdd || oper == operUpdate) || (oper == operRem && level == 0) {
+                    return node.next[level], prev
+                } else {
+                    level--
+                }
+            } else {
+                level--
+            }
         } else {
             level--
         }
     }
     return node, prev
+}
+func (sl *SkipList) String() string {
+    if sl.head == nil {
+        return ""
+    }
+    buf := make([]*bytes.Buffer, sl.maxLevel)
+    for i := 0; i < len(buf); i++ {
+        buf[i] = new(bytes.Buffer)
+    }
+    node := sl.head
+    for node != nil {
+        for i := 0; i < sl.maxLevel; i++ {
+            if i < len(node.next) {
+                buf[i].Write(node.key)
+                buf[i].WriteString(" ")
+            } else {
+                buf[i].WriteString("- ")
+            }
+        }
+        if len(node.next) > 0 {
+            node = node.next[0]
+        } else {
+            node = nil
+        }
+    }
+    re := new(bytes.Buffer)
+    for i := len(buf) - 1; i >= 0; i-- {
+        re.WriteString(buf[i].String())
+        re.WriteString("\n")
+    }
+    return re.String()
 }
