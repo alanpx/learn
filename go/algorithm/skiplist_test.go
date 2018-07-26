@@ -5,29 +5,32 @@ import (
     "strconv"
     "math/rand"
     "bytes"
-    "fmt"
 )
 
 func TestSkipList(t *testing.T) {
-    const N = 10
+    const N = 1000
     data := make(map[int][]byte)
     del := make(map[int]bool)
     sl := SkipList{}
     for i := 0; i < N; i++ {
-        num := int(rand.Int31n(10))
+        num := rand.Int()
         k := []byte(strconv.Itoa(num))
         sl.Add(k, k)
         data[num] = k
-        if i % 3 == 0 {
-            v := append([]byte("a"), k...)
-            sl.Update(k, v)
-            data[num] = v
-        } else if i % 3 == 1 {
-            sl.Rem(k)
-            del[i] = true
-        }
     }
-    fmt.Println(sl.String())
+    i := 0
+    for k, v := range data {
+        key := []byte(strconv.Itoa(k))
+        if i % 3 == 0 {
+            v := append([]byte("a"), v...)
+            sl.Update(key, v)
+            data[k] = v
+        } else if i % 3 == 1 {
+            sl.Rem(key)
+            del[k] = true
+        }
+        i++
+    }
     for k, v := range data {
         val, ok := sl.Get([]byte(strconv.Itoa(k)))
         _, isDel := del[k]
