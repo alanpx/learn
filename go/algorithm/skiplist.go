@@ -10,6 +10,7 @@ type SkipList struct {
     head     *skipListNode
     total    int // count of nodes, to determine max level
     maxLevel int // level is between [0,maxLevel)
+    size     int // length of keys and values
 }
 type skipListNode struct {
     key  []byte
@@ -25,6 +26,9 @@ const (
     operRem
 )
 
+func NewSkipList() *SkipList {
+    return &SkipList{}
+}
 func (sl *SkipList) Get(key []byte) ([]byte, bool) {
     node, _ := sl.seek(key, operGet)
     if node == nil || bytes.Compare(key, node.key) != 0 {
@@ -44,6 +48,8 @@ func (sl *SkipList) Add(key []byte, val []byte) bool {
     if node != nil && bytes.Compare(key, node.key) == 0 {
         return false
     }
+
+    sl.size += len(key) + len(val)
     if node == nil {
         newNode.next[0] = sl.head
         sl.head = &newNode
@@ -67,7 +73,6 @@ func (sl *SkipList) Add(key []byte, val []byte) bool {
     for i := 0; i < len(newNode.next) && i < len(prev) && prev[i] != nil; i++ {
         prev[i].next[i] = &newNode
     }
-
     return true
 }
 func (sl *SkipList) Update(key []byte, val []byte) bool {
@@ -75,6 +80,8 @@ func (sl *SkipList) Update(key []byte, val []byte) bool {
     if node == nil || bytes.Compare(key, node.key) != 0 {
         return false
     }
+
+    sl.size += len(val) - len(node.val)
     node.val = val
     return true
 }
@@ -84,6 +91,8 @@ func (sl *SkipList) Rem(key []byte) bool {
     if node == nil || bytes.Compare(key, node.key) != 0 {
         return false
     }
+
+    sl.size -= len(node.key) + len(node.val)
     if prev == nil {
         sl.head = node.next[0]
     }

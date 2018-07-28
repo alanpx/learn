@@ -11,7 +11,7 @@ func TestSkipList(t *testing.T) {
     const N = 1000
     data := make(map[int][]byte)
     del := make(map[int]bool)
-    sl := SkipList{}
+    sl := NewSkipList()
     for i := 0; i < N; i++ {
         num := rand.Int()
         k := []byte(strconv.Itoa(num))
