@@ -11,14 +11,14 @@ import (
 )
 
 type LSM struct {
-    *lsmConf
+    *LSMConf
     mem *SkipList   // Memtable
     imem *SkipList  // Immutable Memtable
     tableId uint16  // increment 1 when producing new table
     manifest []*lsmManifest // manifest for every level
     memSize uint32
 }
-type lsmConf struct {
+type LSMConf struct {
     Dir string
     BlockSize uint32
     MemSyncSize uint32
@@ -34,18 +34,18 @@ type lsmManifest struct {
 type lsmKeyLenType uint16
 type lsmValueLenType uint32
 type lsmRecordLenType uint32
-type recordType byte
+type lsmRecordType byte
 const (
-    _ recordType = iota
+    _ lsmRecordType = iota
     recordFull
     recordFirst
     recordMiddle
     recordLast
 )
 
-func NewLSM(conf *lsmConf) *LSM {
+func NewLSM(conf *LSMConf) *LSM {
     lsm := LSM{}
-    lsm.lsmConf = conf
+    lsm.LSMConf = conf
     lsm.mem = NewSkipList()
     lsm.readManifest()
     return &lsm
@@ -74,7 +74,7 @@ func (lsm *LSM) Get(key []byte) ([]byte, bool) {
         m := lsm.manifest[i]
         for j := 0; j < int(m.fileCount); j++ {
             if bytes.Compare(key, m.minKey[j]) >= 0 && bytes.Compare(key, m.maxKey[j]) <= 0 {
-                val, ok := lsm.getFromSSTable(key, m.fileName[j])
+                val, ok := lsm.getFromSSTable(key, m.fileName[j], m.dataBlockCount[j])
                 if ok {
                     return val, ok
                 }
@@ -83,11 +83,77 @@ func (lsm *LSM) Get(key []byte) ([]byte, bool) {
     }
     return nil ,false
 }
-func (lsm *LSM) getFromSSTable(key []byte, fileName string) ([]byte, bool) {
+func (lsm *LSM) getFromSSTable(key []byte, fileName string, dataBlockCount uint32) ([]byte, bool) {
+    file, err := os.Open(fileName)
+    if err != nil {
+        return nil, false
+    }
+    defer file.Close()
+
+    index := make([]byte, lsm.BlockSize)
+    file.ReadAt(index, int64(dataBlockCount * lsm.BlockSize))
+    indexReader := bytes.NewReader(index)
+    maxKey := make([][]byte, dataBlockCount)
+    var keyLen keyLenType
+    i := 0
+    for i = 0; i < len(maxKey); i++ {
+        binary.Read(indexReader, binary.LittleEndian, &keyLen)
+        maxKey[i] = make([]byte, keyLen)
+        if keyLen > 0 {
+            binary.Read(indexReader, binary.LittleEndian, &maxKey[i])
+        }
+        if bytes.Compare(key, maxKey[i]) <= 0 {
+            break
+        }
+    }
+
+    data := make([]byte, lsm.BlockSize)
+    file.ReadAt(data, int64(dataBlockCount * lsm.BlockSize))
+    dataReader := bytes.NewReader(data)
+    var recordType lsmRecordType
+    var recordLen lsmRecordLenType
+    for dataReader.Len() > 0 {
+        binary.Read(dataReader, binary.LittleEndian, &recordType)
+        binary.Read(dataReader, binary.LittleEndian, &recordLen)
+        if recordType == recordFirst || recordType == recordFull {
+            var keyLen lsmKeyLenType
+            binary.Read(dataReader, binary.LittleEndian, &keyLen)
+            k := make([]byte, keyLen)
+            binary.Read(dataReader, binary.LittleEndian, &key)
+            valLen := int(recordLen) - int(unsafe.Sizeof(lsmKeyLenType(0))) - int(keyLen)
+            if bytes.Compare(key, k) == 0 {
+                if recordType == recordFull {
+                    val := make([]byte, valLen)
+                    binary.Read(dataReader, binary.LittleEndian, &val)
+                    return val, true
+                } else {
+                    data = make([]byte, lsm.BlockSize)
+                    file.ReadAt(data, int64((dataBlockCount+1) * lsm.BlockSize))
+                }
+            }
+        } else if recordType == recordMiddle || recordType == recordLast {
+            record := make([]byte, recordLen)
+            binary.Read(dataReader, binary.LittleEndian, &record)
+        } else {
+            // the rest space is not enough for a record
+            break
+        }
+    }
+
     return nil, false
 }
+func (lsm *LSM) SyncAll() {
+    lsm.syncImem()
+    lsm.syncManifest()
+}
 func (lsm *LSM) syncImem() {
+    if lsm.imem == nil {
+        return
+    }
+
     /*
+     * Every block should begin with a record(otherwise it can not be parsed individually).
+     * If the spare space is not enough for the record prefix and the key, the record will be put to the next block(for the sake of parsing).
      * recordFull   lsmRecordLenType lsmKeyLenType key val
      * recordFirst  lsmRecordLenType lsmKeyLenType key val
      * recordMiddle lsmRecordLenType val
@@ -99,32 +165,39 @@ func (lsm *LSM) syncImem() {
     minKey = node.key
     size := 0
     spare := int(lsm.BlockSize)
-    prefixSize := int(unsafe.Sizeof(recordType(0)) + unsafe.Sizeof(lsmRecordLenType(0)))
-    var minKeySlice [][]byte
+    prefixSize := int(unsafe.Sizeof(lsmRecordType(0)) + unsafe.Sizeof(lsmRecordLenType(0)))
+    maxKeyMap := make(map[int][]byte)
+    block := 0
     for node != nil {
         eleBuf := new(bytes.Buffer)
         binary.Write(eleBuf, binary.LittleEndian, lsmKeyLenType(len(node.key)))
         binary.Write(eleBuf, binary.LittleEndian, node.key)
         binary.Write(eleBuf, binary.LittleEndian, node.val)
+
         if eleBuf.Len() <= spare - prefixSize {
             binary.Write(buf, binary.LittleEndian, recordFull)
             binary.Write(buf, binary.LittleEndian, lsmRecordLenType(eleBuf.Len()))
             binary.Write(buf, binary.LittleEndian, eleBuf.Bytes())
             size += prefixSize + eleBuf.Len()
+            block = int(math.Ceil(float64(size/int(lsm.BlockSize))))
+            maxKeyMap[block] = node.key
         } else {
             hasFirst := false
-            if prefixSize < spare {
+            if prefixSize + int(unsafe.Sizeof(lsmKeyLenType(0))) + len(node.key) < spare {
                 binary.Write(buf, binary.LittleEndian, recordFirst)
                 binary.Write(buf, binary.LittleEndian, lsmRecordLenType(spare - prefixSize))
                 data := make([]byte, spare - prefixSize)
                 eleBuf.Read(data)
                 binary.Write(buf, binary.LittleEndian, data)
                 hasFirst = true
+                block = int(math.Ceil(float64(size/int(lsm.BlockSize))))
+                maxKeyMap[block] = node.key
             } else {
                 binary.Write(buf, binary.LittleEndian, make([]byte, spare))
             }
             size += spare
             spare = int(lsm.BlockSize)
+
             for eleBuf.Len() > 0 {
                 if !hasFirst {
                     binary.Write(buf, binary.LittleEndian, recordFirst)
@@ -138,6 +211,10 @@ func (lsm *LSM) syncImem() {
                 l, _ := eleBuf.Read(data)
                 binary.Write(buf, binary.LittleEndian, data[0:l])
                 size += prefixSize + l
+                if !hasFirst {
+                    block = int(math.Ceil(float64(size / int(lsm.BlockSize))))
+                    maxKeyMap[block] = node.key
+                }
             }
         }
 
@@ -150,6 +227,25 @@ func (lsm *LSM) syncImem() {
             maxKey = node.key
         }
         node = node.next[0]
+    }
+
+    if size % int(lsm.BlockSize) > 0 {
+        binary.Write(buf, binary.LittleEndian, make([]byte, int(lsm.BlockSize) - size % int(lsm.BlockSize)))
+    }
+    blockCount := uint32(math.Ceil(float64(size/int(lsm.BlockSize))))
+
+    // index block
+    maxKeySlice := make([][]byte, blockCount)
+    for k, v := range maxKeyMap {
+        maxKeySlice[k] = v
+    }
+    for _, v := range maxKeySlice {
+        if v == nil {
+            binary.Write(buf, binary.LittleEndian, lsmKeyLenType(0))
+        } else {
+            binary.Write(buf, binary.LittleEndian, lsmKeyLenType(len(v)))
+            binary.Write(buf, binary.LittleEndian, v)
+        }
     }
 
     // fileName format: d{level(uint16)}{tableId(uint16)}
@@ -170,10 +266,12 @@ func (lsm *LSM) syncImem() {
     lsm.manifest[0].fileName = append([]string{ fileName }, lsm.manifest[0].fileName...)
     lsm.manifest[0].minKey = append([][]byte{ minKey }, lsm.manifest[0].minKey...)
     lsm.manifest[0].maxKey = append([][]byte{ maxKey }, lsm.manifest[0].maxKey...)
-    blockCount := uint32(math.Ceil(float64(size/int(lsm.BlockSize))))
     lsm.manifest[0].dataBlockCount = append([]uint32{ blockCount }, lsm.manifest[0].dataBlockCount...)
+
+    lsm.imem = nil
 }
 func (lsm *LSM) syncManifest() {
+    // levelCount(uint16) [level(uint16) fileCount(uint16) [keyLen(lsmKeyLenType) minKey([]byte) keyLen(lsmKeyLenType) maxKey([]byte)]]
     buf := new(bytes.Buffer)
     binary.Write(buf, binary.LittleEndian, uint16(len(lsm.manifest)))
     for i := 0; i < len(lsm.manifest); i++ {
