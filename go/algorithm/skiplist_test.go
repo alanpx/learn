@@ -18,6 +18,7 @@ func TestSkipList(t *testing.T) {
         sl.Add(k, k)
         data[num] = k
     }
+
     i := 0
     for k, v := range data {
         key := []byte(strconv.Itoa(k))
@@ -31,6 +32,7 @@ func TestSkipList(t *testing.T) {
         }
         i++
     }
+
     for k, v := range data {
         val, ok := sl.Get([]byte(strconv.Itoa(k)))
         _, isDel := del[k]

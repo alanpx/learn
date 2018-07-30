@@ -37,6 +37,12 @@ func (sl *SkipList) Get(key []byte) ([]byte, bool) {
     return node.val, true
 }
 func (sl *SkipList) Add(key []byte, val []byte) bool {
+    return sl.add(key, val, false)
+}
+func (sl *SkipList) AddOrUpdate(key []byte, val []byte) {
+    sl.add(key, val, true)
+}
+func (sl *SkipList) add(key []byte, val []byte, update bool) bool {
     sl.total++
     sl.maxLevel = int(math.Ceil(math.Log2(float64(sl.total))))
     if sl.maxLevel == 0 {
@@ -46,7 +52,13 @@ func (sl *SkipList) Add(key []byte, val []byte) bool {
     newNode := skipListNode{key, val, make([]*skipListNode, level)}
     node, prev := sl.seek(key, operAdd)
     if node != nil && bytes.Compare(key, node.key) == 0 {
-        return false
+        if update {
+            sl.size += len(val) - len(node.val)
+            node.val = val
+            return true
+        } else {
+            return false
+        }
     }
 
     sl.size += len(key) + len(val)
