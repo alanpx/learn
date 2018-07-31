@@ -22,7 +22,9 @@ func TestLSM(t *testing.T) {
         lsm.Add(k, k)
         data[num] = k
     }
+    lsm.SyncAll()
 
+    lsm = NewLSM(&conf)
     i := 0
     for k, v := range data {
         key := []byte(strconv.Itoa(k))
@@ -36,7 +38,9 @@ func TestLSM(t *testing.T) {
         }
         i++
     }
+    lsm.SyncAll()
 
+    lsm = NewLSM(&conf)
     for k, v := range data {
         val, ok := lsm.Get([]byte(strconv.Itoa(k)))
         _, isDel := del[k]
@@ -50,5 +54,4 @@ func TestLSM(t *testing.T) {
             }
         }
     }
-    lsm.SyncAll()
 }
