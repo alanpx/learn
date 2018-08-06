@@ -5,15 +5,18 @@ import (
     "strconv"
     "math/rand"
     "bytes"
+    "os"
 )
 
 func TestLSM(t *testing.T) {
     conf := LSMConf{}
-    conf.BlockSize = 64
+    conf.BlockSize = 1024*16
     conf.Dir = "/Users/xp/devspace/data/lsm/"
-    conf.MemSyncSize = 128
+    os.RemoveAll(conf.Dir)
+    os.MkdirAll(conf.Dir, os.ModeDir | os.ModePerm)
+    conf.MemSyncSize = 1024*1024
     lsm := NewLSM(&conf)
-    const N = 100
+    const N = 1000
     data := make(map[int][]byte)
     del := make(map[int]bool)
     for i := 0; i < N; i++ {
