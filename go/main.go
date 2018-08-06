@@ -16,11 +16,15 @@ func init() {
 var maxKey = make([]byte, 256)
 
 func main() {
-    fmt.Println(time.Now())
-    fmt.Println(bytes.Compare(Sol2(), maxKey))
-    fmt.Println(time.Now())
-}
+    var beginTime, endTime time.Time
+    var re []byte
 
+    beginTime = time.Now()
+    re = Sol2()
+    endTime = time.Now()
+    fmt.Printf("Sol2 cmp: %d, time: %s \n", bytes.Compare(maxKey, re), endTime.Sub(beginTime))
+}
+// binary search
 func Sol1() []byte {
     key := make([]byte, 256)
     for i := 0; i < 256; i++ {
@@ -41,14 +45,14 @@ func Sol1() []byte {
     }
     return key
 }
+// concurrent traverse
 func Sol2() []byte {
     key := make([]byte, 256)
     for i := 0; i < 256; i++ {
-        var j byte
         ch := make(chan []byte, 256)
         var wg sync.WaitGroup
-        for j != 255 {
-            key[i] = j
+        for j := 0; j < 256; j++ {
+            key[i] = byte(j)
             k := make([]byte, 256)
             copy(k, key)
             wg.Add(1)
@@ -56,12 +60,11 @@ func Sol2() []byte {
                 defer wg.Add(-1)
                 ch <- Search(k)
             }()
-            j++
         }
 
         wg.Wait()
         var max byte
-        for j := 0; j < 255; j++ {
+        for j := 0; j < 256; j++ {
             re := <-ch
             if re != nil && re[i] > max {
                 max = re[i]
