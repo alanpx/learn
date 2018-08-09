@@ -19,12 +19,16 @@ func main() {
     var beginTime, endTime time.Time
     var re []byte
 
+    fmt.Println(maxKey)
+    fmt.Println()
     beginTime = time.Now()
-    re = Sol2()
+    re = Sol3()
     endTime = time.Now()
+    fmt.Println(re)
     fmt.Printf("Sol2 cmp: %d, time: %s \n", bytes.Compare(maxKey, re), endTime.Sub(beginTime))
 }
-// binary search
+
+// bytewise search
 func Sol1() []byte {
     key := make([]byte, 256)
     for i := 0; i < 256; i++ {
@@ -45,7 +49,8 @@ func Sol1() []byte {
     }
     return key
 }
-// concurrent traverse
+
+// concurrent bytewise search
 func Sol2() []byte {
     key := make([]byte, 256)
     for i := 0; i < 256; i++ {
@@ -74,10 +79,97 @@ func Sol2() []byte {
     }
     return key
 }
+
+// binary search
+func Sol3() []byte {
+    min := make([]byte, 256)
+    max := make([]byte, 256)
+    for i := 0; i < 256; i++ {
+        max[i] = 255
+    }
+    _, s := sub(max, min)
+    _, mid := add(min,shift(s))
+    for bytes.Compare(min, mid) != 0 {
+        fmt.Println(min)
+        fmt.Println(mid)
+        fmt.Println(max)
+        fmt.Println()
+        if Search(mid) == nil {
+            max = mid
+        } else {
+            min = mid
+        }
+        _, s = sub(max, min)
+        _, mid = add(min,shift(s))
+    }
+    if Search(max) != nil {
+        return max
+    } else {
+        return min
+    }
+}
 func Search(key []byte) []byte {
     time.Sleep(time.Millisecond * 10)
     if bytes.Compare(key, maxKey) > 0 {
         return nil
     }
     return key
+}
+
+// return a+b
+func add(a []byte, b []byte) (byte, []byte) {
+    if a == nil || b == nil || len(a) != len(b) {
+        return 0, nil
+    }
+    var carry byte = 0
+    var temp int16 = 0
+    re := make([]byte, len(a))
+    for i := len(a) - 1; i >= 0; i-- {
+        temp = int16(a[i]) + int16(b[i]) + int16(carry)
+        if temp >= 256 {
+            temp -= 256
+            carry = 1
+        } else {
+            carry = 0
+        }
+        re[i] = byte(temp)
+    }
+    return carry, re
+}
+
+// return a-b
+func sub(a []byte, b []byte) (byte, []byte) {
+    if a == nil || b == nil || len(a) != len(b) {
+        return 0, nil
+    }
+    var borrow byte = 0
+    var temp int16 = 0
+    re := make([]byte, len(a))
+    for i := len(a) - 1; i >= 0; i-- {
+        temp = int16(a[i]) - int16(b[i]) - int16(borrow)
+        if temp < 0 {
+            temp += 256
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        re[i] = byte(temp)
+    }
+    return borrow, re
+}
+
+// right shift a by 1 bit
+func shift(a []byte) []byte {
+    if a == nil {
+        return nil
+    }
+    re := make([]byte, len(a))
+    for i := len(a) - 1; i >= 0; i-- {
+        if i > 0 {
+            re[i] = (a[i-1]%2)*128 + a[i]/2
+        } else {
+            re[i] /= 2
+        }
+    }
+    return re
 }
