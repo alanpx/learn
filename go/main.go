@@ -23,7 +23,7 @@ func main() {
     beginTime = time.Now()
     re = Sol3()
     endTime = time.Now()
-    fmt.Printf("Sol2 cmp: %d, time: %s \n", bytes.Compare(maxKey, re), endTime.Sub(beginTime))
+    fmt.Printf("Sol3 cmp: %d, time: %s \n", bytes.Compare(maxKey, re), endTime.Sub(beginTime))
 }
 
 // bytewise search
@@ -95,16 +95,26 @@ func Sol3() []byte {
         ch := make(chan *searchResult, len(mid))
         for i := 0; i < len(mid); i++ {
             go func(index int) {
-                ch <- &searchResult{index,Search(mid[index])}
+                ch <- &searchResult{index, Search(mid[index])}
             }(i)
         }
         tmp := min
-        var lower int
+        lower := 0
+        upper := len(mid) - 1
         for j := 0; j < len(mid); j++ {
             re := <-ch
-            if re.result != nil && bytes.Compare(re.result, tmp) > 0 {
+            if re.result != nil && re.index > lower {
                 tmp = re.result
                 lower = re.index
+                if re.index == len(mid) - 1 {
+                    break
+                }
+            }
+            if re.result == nil && re.index < upper {
+                upper = re.index
+                if upper == lower + 1 {
+                    break
+                }
             }
         }
         min = tmp
@@ -121,22 +131,25 @@ func Sol3() []byte {
         mid, over = getMid(min, max)
     }
 }
+var zero []byte = make([]byte, 256)
+var one []byte = append(make([]byte, 255), 1)
 func getMid(min []byte, max []byte) ([][]byte, bool) {
-    n := 512
+    n := 2048
     _, s := sub(max, min)
-    delta := shift(s, 9)
+    delta := shift(s, 11)
     var mid [][]byte
     over := false
-    if bytes.Compare(delta, make([]byte, 256)) != 0 {
+    if bytes.Compare(delta, zero) != 0 {
         mid = make([][]byte, n-1)
         for i := 0; i < len(mid); i++ {
-            _, product := mul(delta, uint16(i+1))
-            _, mid[i] = add(min, product)
+            if i == 0 {
+                _, mid[i] = add(min, delta)
+            } else {
+                _, mid[i] = add(mid[i-1], delta)
+            }
         }
     } else {
         over = true
-        one := make([]byte, 256)
-        one[len(one)-1] = 1
         _, s := add(min, one)
         for bytes.Compare(s, max) != 0 {
             mid = append(mid, s)
