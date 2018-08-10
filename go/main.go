@@ -23,7 +23,6 @@ func main() {
     beginTime = time.Now()
     re = Sol3()
     endTime = time.Now()
-    fmt.Println(re)
     fmt.Printf("Sol2 cmp: %d, time: %s \n", bytes.Compare(maxKey, re), endTime.Sub(beginTime))
 }
 
@@ -81,6 +80,10 @@ func Sol2() []byte {
 
 // binary search(take byte slice as big number)
 func Sol3() []byte {
+    type searchResult struct {
+        index int
+        result []byte
+    }
     min := make([]byte, 256)
     max := make([]byte, 256)
     for i := 0; i < 256; i++ {
@@ -89,23 +92,24 @@ func Sol3() []byte {
 
     mid, over := getMid(min, max)
     for {
-        ch := make(chan []byte, len(mid))
+        ch := make(chan *searchResult, len(mid))
         for i := 0; i < len(mid); i++ {
             go func(index int) {
-                ch <- Search(mid[index])
+                ch <- &searchResult{index,Search(mid[index])}
             }(i)
         }
         tmp := min
-        var j int
-        for j = 0; j < len(mid); j++ {
+        var lower int
+        for j := 0; j < len(mid); j++ {
             re := <-ch
-            if re != nil && bytes.Compare(re, tmp) > 0 {
-                tmp = re
+            if re.result != nil && bytes.Compare(re.result, tmp) > 0 {
+                tmp = re.result
+                lower = re.index
             }
         }
         min = tmp
-        if j < len(mid)-1 {
-            max = mid[j+1]
+        if lower < len(mid)-1 {
+            max = mid[lower+1]
         }
         if over {
             if Search(max) != nil {
@@ -118,15 +122,16 @@ func Sol3() []byte {
     }
 }
 func getMid(min []byte, max []byte) ([][]byte, bool) {
-    n := 256
+    n := 512
     _, s := sub(max, min)
-    delta := shift(s, 8)
+    delta := shift(s, 9)
     var mid [][]byte
     over := false
     if bytes.Compare(delta, make([]byte, 256)) != 0 {
         mid = make([][]byte, n-1)
         for i := 0; i < len(mid); i++ {
-            _, mid[i] = mul(delta, uint16(i+1))
+            _, product := mul(delta, uint16(i+1))
+            _, mid[i] = add(min, product)
         }
     } else {
         over = true
@@ -138,9 +143,6 @@ func getMid(min []byte, max []byte) ([][]byte, bool) {
             _, s = add(s, one)
         }
     }
-    fmt.Println(min)
-    fmt.Println(len(mid))
-    fmt.Println(max)
     return mid, over
 }
 func Search(key []byte) []byte {
@@ -206,7 +208,7 @@ func shift(a []byte, n uint) []byte {
 
     for i := len(a) - 1; i >= 0; i-- {
         if i > 0 {
-            re[i] = (re[i-1]%byte(math.Exp2(float64(n))))*byte(math.Exp2(float64(8-n))) + a[i]/byte(math.Exp2(float64(n)))
+            re[i] = (re[i-1]%byte(math.Exp2(float64(n))))*byte(math.Exp2(float64(8-n))) + re[i]/byte(math.Exp2(float64(n)))
         } else {
             re[i] = re[i] / byte(math.Exp2(float64(n)))
         }
